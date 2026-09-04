@@ -197,11 +197,11 @@ const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
 
-const ROLES = {
-  STAFF: '填報同事',
-  ADMIN: 'WRD 規劃／管理員',
-  OWNER: '系統擁有人'
+const GROUPS = {
+  BO: 'BO',
+  WRD: 'WRD'
 };
+const SYSTEM_ADMIN_NAME = 'Anson Tse'; // 系統管理人身份僅此人可勾選
 
 const SEED_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","AEO Men","Adidas","Levis China","UQ","ANF","Target","CAL-PD","PPC"];
 
@@ -235,34 +235,73 @@ let SAVING = false;
 
 let SESSION = {
   userName: '',
-  role: 'STAFF'
+  group: 'BO',          // 只分兩組：'WRD' 或 'BO'
+  isSystemAdmin: false  // 系統管理員身份，僅姓名為 Anson Tse 時可勾選
 };
+
+function isPrivileged(){ // WRD 組或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
+  return SESSION.group === 'WRD' || SESSION.isSystemAdmin;
+}
+function identityLabel(){
+  if(SESSION.isSystemAdmin) return '系統管理員';
+  return SESSION.group === 'WRD' ? 'WRD' : 'BO';
+}
+function isSystemAdminEligible(name){
+  return (name||'').trim() === SYSTEM_ADMIN_NAME;
+}
+function validateNameNoInnerSpace(name){
+  const trimmed = (name||'').trim();
+  return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
+}
 
 let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
+/* 說明：window.storage 是 Claude 內建 Artifact 執行環境才有的雲端共用儲存 API。
+   若此檔案被部署到外部（例如 GitHub Pages），瀏覽器並沒有這個 API，
+   因此以下會自動偵測並改用瀏覽器 localStorage 作為備援，避免資料完全遺失。
+   請注意：localStorage 僅儲存在「該台裝置、該個瀏覽器」內，不會在同事之間同步。
+   若要多人共用同一份即時資料，必須改接正式後端資料庫（見對話中的說明）。 */
+const STORAGE_KEY = 'wsps:data';
+const HAS_CLOUD_STORAGE = (typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function');
+let USING_LOCAL_FALLBACK = !HAS_CLOUD_STORAGE;
+async function storageGet(){
+  if(HAS_CLOUD_STORAGE){
+    return await window.storage.get(STORAGE_KEY, true);
+  }
+  const raw = window.localStorage ? window.localStorage.getItem(STORAGE_KEY) : null;
+  return raw ? {value: raw} : null;
+}
+async function storageSet(valueStr){
+  if(HAS_CLOUD_STORAGE){
+    return await window.storage.set(STORAGE_KEY, valueStr, true);
+  }
+  if(window.localStorage) window.localStorage.setItem(STORAGE_KEY, valueStr);
+  return {value: valueStr};
+}
+
 async function loadState(){
   try{
-    const r = await window.storage.get('wsps:data', true);
+    const r = await storageGet();
     if(r && r.value){
       const parsed = JSON.parse(r.value);
       STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[]}, parsed);
     } else {
       seedInitialData();
-      await persist();
     }
   }catch(e){
     seedInitialData();
-    await persist();
   }
+  runHistoricalImportMigration();
+  await persist();
   LOADED = true;
 }
 
 async function persist(){
   try{
     SAVING = true;
-    await window.storage.set('wsps:data', JSON.stringify(STATE), true);
+    await storageSet(JSON.stringify(STATE));
   }catch(e){
     console.error('儲存失敗', e);
   }finally{
@@ -281,47 +320,125 @@ function flashSaved(){
 
 function seedInitialData(){
   STATE.brands = SEED_BRANDS.map(name=>({id:uid('brand'), name, active:true}));
-  // seed future 6 months starting this month, each with standard 5-day work weeks (Mon-Fri) covering the month
+  // 業務週採「週五至週二」為一週期（非 1-6 或週一至週五），未來 6 個月自動產生預設週別
   const today = new Date();
   for(let i=0;i<6;i++){
     const md = new Date(today.getFullYear(), today.getMonth()+i, 1);
     const ym = md.getFullYear()+'-'+pad(md.getMonth()+1);
     const monthId = uid('month');
     STATE.months.push({id:monthId, ym, pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''});
-    // split month into weeks (Mon-based), assign to this planning month
-    let cursor = new Date(md.getFullYear(), md.getMonth(), 1);
+    const monthStart = new Date(md.getFullYear(), md.getMonth(), 1);
     const monthEnd = new Date(md.getFullYear(), md.getMonth()+1, 0);
-    // align to Monday
-    while(cursor.getDay()!==1 && cursor <= monthEnd){
-      // if month doesn't start on Monday, first partial week still counts, walk back to Monday for start ref only
-      break;
-    }
-    let weekStart = new Date(md.getFullYear(), md.getMonth(), 1);
+    // 找到當月 1 號當週或之前最近的週五，作為第一個業務週的起點
+    let weekStart = new Date(monthStart);
+    while(weekStart.getDay() !== 5){ weekStart = addDays(weekStart, -1); }
     while(weekStart <= monthEnd){
-      let weekEnd = addDays(weekStart, 6 - weekStart.getDay() === -1 ? 0 : (7 - ((weekStart.getDay()+6)%7) -1));
-      // simpler: week runs to the next Sunday or month end, whichever first
-      let dow = weekStart.getDay(); // 0 Sun..6 Sat
-      let daysToSunday = (7 - dow) % 7;
-      weekEnd = addDays(weekStart, daysToSunday);
-      if(weekEnd > monthEnd) weekEnd = new Date(monthEnd);
-      // count workdays Mon-Fri within [weekStart, weekEnd]
-      let workdays = 0;
-      let c = new Date(weekStart);
-      while(c <= weekEnd){
-        const d = c.getDay();
-        if(d>=1 && d<=5) workdays++;
-        c = addDays(c,1);
-      }
-      if(workdays>0){
+      const weekEnd = addDays(weekStart, 4); // 週五至週二，共 5 個日曆日
+      const clipStart = weekStart < monthStart ? monthStart : weekStart;
+      const clipEnd = weekEnd > monthEnd ? monthEnd : weekEnd;
+      if(clipStart <= clipEnd){
+        const days = Math.round((clipEnd - clipStart) / 86400000) + 1; // 以週期內實際日曆日數作為工作日數，不以 1-6 或週一至週五篩選
         STATE.weeks.push({
-          id: uid('week'), monthId, startDate: fmtDate(weekStart), endDate: fmtDate(weekEnd),
-          workdays, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+          id: uid('week'), monthId, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
+          workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
           overrideReason:'', overrideBy:'', overrideAt:''
         });
       }
-      weekStart = addDays(weekEnd,1);
+      weekStart = addDays(weekStart, 7);
     }
   }
+}
+
+/* ============================= 歷史資料匯入（來源：Washing_sample_projection_system.xlsx）=============================
+   已確認變更：原規劃（文件 10.7）暫不匯入 2026 年 8–10 月歷史資料，經使用者明確指示後改為匯入。
+   範圍已縮小為使用者確認的內容：僅匯入每月「款數、件數」總計，逐客戶對照，不匯入完成數、
+   準確率，亦不拆分至各業務週（以一個涵蓋全月的區間代表該月合計）。10 月份 Excel 內容全部為 0
+   （尚未規劃），故不匯入。此匯入邏輯具冪等性（_historicalImportV1 旗標），不會重複寫入。 */
+const HISTORICAL_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","Bestseller","Zara","Adidas","Kontoor",
+  "CAL-PD(Mathew Wong Team)","PPC-Paul组客户","Levis China","Joeone","UQ","ANF","AEO Men","GAP","ON",
+  "Banana Republic","M&S","Tom Tailor","Target","CAL-PD(Emily Tsoi Team)","PPC-Jonie组客户","Other"];
+const HISTORICAL_INACTIVE_BRANDS = ["Joeone","M&S","Tom Tailor"]; // Excel 備註「已不做此客」
+const HISTORICAL_MONTHLY = {
+  "2026-08": {
+    "Levis Women":[285,2884],"Levis Men":[21,78],"Quetico":[13,120],"AEO Women":[2,4],"Bestseller":[4,8],
+    "Zara":[28,62],"Adidas":[80,215],"Kontoor":[0,0],"CAL-PD(Mathew Wong Team)":[44,135],"PPC-Paul组客户":[4,120],
+    "Levis China":[201,1140],"Joeone":[0,0],"UQ":[83,325],"ANF":[98,351],"AEO Men":[61,232],"GAP":[39,104],
+    "ON":[1,5],"Banana Republic":[26,77],"M&S":[0,0],"Tom Tailor":[0,0],"Target":[270,649],
+    "CAL-PD(Emily Tsoi Team)":[43,88],"PPC-Jonie组客户":[13,116],"Other":[0,0]
+  },
+  "2026-09": {
+    "Levis Women":[31,1480],"Levis Men":[8,26],"Quetico":[6,12],"AEO Women":[2,12],"Bestseller":[0,0],
+    "Zara":[0,0],"Adidas":[21,77],"Kontoor":[0,0],"CAL-PD(Mathew Wong Team)":[38,146],"PPC-Paul组客户":[5,166],
+    "Levis China":[127,490],"Joeone":[0,0],"UQ":[115,305],"ANF":[125,456],"AEO Men":[88,275],"GAP":[32,210],
+    "ON":[0,0],"Banana Republic":[23,210],"M&S":[0,0],"Tom Tailor":[0,0],"Target":[230,670],
+    "CAL-PD(Emily Tsoi Team)":[45,100],"PPC-Jonie组客户":[0,0],"Other":[0,0]
+  }
+};
+function monthWorkdays(ym){
+  const [y,m] = ym.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  let wd = 0;
+  for(let d=1; d<=last; d++){ const dow = new Date(y, m-1, d).getDay(); if(dow>=1 && dow<=5) wd++; }
+  return wd;
+}
+function monthRange(ym){
+  const [y,m] = ym.split('-').map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return { start: y+'-'+pad(m)+'-01', end: y+'-'+pad(m)+'-'+pad(last) };
+}
+function runHistoricalImportMigration(){
+  if(STATE._historicalImportV1) return;
+
+  HISTORICAL_BRANDS.forEach(name=>{
+    let b = STATE.brands.find(x=>x.name===name);
+    if(!b){
+      b = {id:uid('brand'), name, active: !HISTORICAL_INACTIVE_BRANDS.includes(name)};
+      STATE.brands.push(b);
+    } else if(HISTORICAL_INACTIVE_BRANDS.includes(name)){
+      b.active = false;
+    }
+  });
+  // 舊版預設種子資料中籠統的「CAL-PD」「PPC」與 Excel 實際分組名稱不符，停用避免混淆
+  ["CAL-PD","PPC"].forEach(name=>{
+    const b = STATE.brands.find(x=>x.name===name);
+    if(b) b.active = false;
+  });
+
+  Object.keys(HISTORICAL_MONTHLY).forEach(ym=>{
+    let month = STATE.months.find(m=>m.ym===ym);
+    if(!month){
+      month = {id:uid('month'), ym, pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''};
+      STATE.months.push(month);
+    }
+    let week = STATE.weeks.find(w=>w.monthId===month.id && w._isMonthlyImportWeek);
+    if(!week){
+      const range = monthRange(ym);
+      week = {
+        id: uid('week'), monthId: month.id, startDate: range.start, endDate: range.end,
+        workdays: monthWorkdays(ym), styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+        overrideReason:'歷史月度資料匯入，未拆分至週', overrideBy:'系統匯入', overrideAt: nowStr(),
+        _isMonthlyImportWeek: true
+      };
+      STATE.weeks.push(week);
+    }
+    const data = HISTORICAL_MONTHLY[ym];
+    Object.keys(data).forEach(bn=>{
+      const brand = STATE.brands.find(x=>x.name===bn);
+      if(!brand) return;
+      const already = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===week.id && f.status!=='cancelled');
+      if(already) return;
+      const [styles, pieces] = data[bn];
+      const ts = nowStr();
+      STATE.forecasts.push({
+        id: uid('fc'), brandId: brand.id, weekId: week.id, itemRef:'', styles, pieces,
+        note:'歷史月度合計匯入（來源：Washing_sample_projection_system.xlsx，僅月度總數，未拆分至週）',
+        status:'active', createdBy:'系統匯入', createdAt: ts, modifiedBy:'系統匯入', modifiedAt: ts,
+        history:[{at:ts, by:'系統匯入', from:null, to:{styles,pieces}}]
+      });
+    });
+  });
+
+  STATE._historicalImportV1 = true;
 }
 
 /* ============================= 計算邏輯 ============================= */
@@ -473,56 +590,70 @@ function renderLogin(){
       <div class="zh">Washing Sample Projection System</div>
       <div class="en">WSPS · ZSYD WRD 內部系統</div>
     </div>
-    <p class="muted" style="margin-bottom:18px;">請輸入姓名與身分以繼續。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
-    <div class="field" style="margin-bottom:12px;">
+    <p class="muted" style="margin-bottom:18px;">請輸入姓名與群組以繼續。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
+    <div class="field" style="margin-bottom:6px;">
       <label>姓名</label>
       <input id="loginName" type="text" placeholder="例如：陳小華" style="width:100%;">
     </div>
-    <div class="field" style="margin-bottom:20px;">
-      <label>身分</label>
-      <select id="loginRole" style="width:100%;">
-        <option value="STAFF">填報同事（BO 跟單／需求填報）</option>
-        <option value="ADMIN">WRD 規劃／管理員</option>
-        <option value="OWNER">系統擁有人</option>
+    <p class="footnote" style="margin:0 0 14px;">姓名中間不可有空格（例如「Anson Tse」可以，「An son Tse」不可以）。</p>
+    <div class="field" style="margin-bottom:12px;">
+      <label>群組</label>
+      <select id="loginGroup" style="width:100%;">
+        <option value="BO">BO</option>
+        <option value="WRD">WRD</option>
       </select>
     </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:20px;">
+      <input type="checkbox" id="loginSysAdmin" disabled>
+      <label for="loginSysAdmin" style="font-size:12.5px;margin:0;">系統管理員身份（僅 ${SYSTEM_ADMIN_NAME} 可勾選）</label>
+    </div>
     <button class="btn" id="loginBtn" style="width:100%;">進入系統</button>
-    <p class="footnote" style="margin-top:14px;">身分權限依規格文件第 6 節設定：填報同事僅可見自己逐筆資料；管理員與系統擁有人可見全部明細與設定。</p>
+    <p class="footnote" style="margin-top:14px;">BO 僅可見自己逐筆資料並只能修改自己輸入的資料；WRD 與系統管理員可見全部明細、可修改他人資料及管理系統設定。</p>
   </div>`;
 }
 function bindLogin(){
+  const nameInput = document.getElementById('loginName');
+  const sysAdminBox = document.getElementById('loginSysAdmin');
+  nameInput.addEventListener('input', ()=>{
+    const eligible = isSystemAdminEligible(nameInput.value);
+    sysAdminBox.disabled = !eligible;
+    if(!eligible) sysAdminBox.checked = false;
+  });
   document.getElementById('loginBtn').onclick = ()=>{
-    const name = document.getElementById('loginName').value.trim();
-    const role = document.getElementById('loginRole').value;
-    if(!name){ alert('請輸入姓名'); return; }
-    SESSION.userName = name; SESSION.role = role;
+    const rawName = nameInput.value;
+    if(!validateNameNoInnerSpace(rawName)){ alert('姓名中間不可有空格，請重新輸入'); return; }
+    const name = rawName.trim();
+    const group = document.getElementById('loginGroup').value;
+    const wantsSysAdmin = sysAdminBox.checked;
+    if(wantsSysAdmin && !isSystemAdminEligible(name)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); return; }
+    SESSION.userName = name; SESSION.group = group; SESSION.isSystemAdmin = wantsSysAdmin;
     render();
   };
 }
 
 const TABS = [
-  {id:'overview', label:'未來產能總覽', roles:['STAFF','ADMIN','OWNER']},
-  {id:'matrix', label:'月度預測輸入', roles:['STAFF','ADMIN','OWNER']},
-  {id:'weekly', label:'週度明細', roles:['ADMIN','OWNER']},
-  {id:'mine', label:'我的預測', roles:['STAFF','ADMIN','OWNER']},
-  {id:'calendar', label:'產能日曆與上限設定', roles:['ADMIN','OWNER']},
-  {id:'brands', label:'客戶／品牌管理', roles:['ADMIN','OWNER']},
-  {id:'export', label:'匯出', roles:['ADMIN','OWNER']},
+  {id:'overview', label:'未來產能總覽', privileged:false},
+  {id:'matrix', label:'月度預測輸入', privileged:false},
+  {id:'weekly', label:'週度明細', privileged:true},
+  {id:'mine', label:'我的預測', privileged:false},
+  {id:'calendar', label:'產能日曆與上限設定', privileged:true},
+  {id:'brands', label:'客戶／品牌管理', privileged:true},
+  {id:'export', label:'匯出', privileged:true},
 ];
 
 function renderShell(){
-  const tabsHtml = TABS.filter(t=>t.roles.includes(SESSION.role)).map(t=>
+  const tabsHtml = TABS.filter(t=>!t.privileged || isPrivileged()).map(t=>
     `<button data-tab="${t.id}" class="${VIEW.tab===t.id?'active':''}">${t.label}</button>`
   ).join('');
   let body = '';
   switch(VIEW.tab){
     case 'overview': body = renderOverview(); break;
     case 'matrix': body = renderMatrix(); break;
-    case 'weekly': body = SESSION.role==='STAFF' ? renderNoAccess() : renderWeekly(); break;
+    case 'weekly': body = !isPrivileged() ? renderNoAccess() : renderWeekly(); break;
     case 'mine': body = renderMine(); break;
-    case 'calendar': body = SESSION.role==='STAFF' ? renderNoAccess() : renderCalendar(); break;
-    case 'brands': body = SESSION.role==='STAFF' ? renderNoAccess() : renderBrands(); break;
-    case 'export': body = SESSION.role==='STAFF' ? renderNoAccess() : renderExport(); break;
+    case 'calendar': body = !isPrivileged() ? renderNoAccess() : renderCalendar(); break;
+    case 'brands': body = !isPrivileged() ? renderNoAccess() : renderBrands(); break;
+    case 'export': body = !isPrivileged() ? renderNoAccess() : renderExport(); break;
     default: body = renderOverview();
   }
   return `
@@ -537,15 +668,19 @@ function renderShell(){
           <input id="curName" value="${SESSION.userName}" style="width:140px;">
         </div>
         <div class="field">
-          <label>身分</label>
-          <select id="curRole">
-            <option value="STAFF" ${SESSION.role==='STAFF'?'selected':''}>${ROLES.STAFF}</option>
-            <option value="ADMIN" ${SESSION.role==='ADMIN'?'selected':''}>${ROLES.ADMIN}</option>
-            <option value="OWNER" ${SESSION.role==='OWNER'?'selected':''}>${ROLES.OWNER}</option>
+          <label>群組</label>
+          <select id="curGroup">
+            <option value="BO" ${SESSION.group==='BO'?'selected':''}>BO</option>
+            <option value="WRD" ${SESSION.group==='WRD'?'selected':''}>WRD</option>
           </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;padding-bottom:7px;">
+          <input type="checkbox" id="curSysAdmin" ${SESSION.isSystemAdmin?'checked':''} ${isSystemAdminEligible(SESSION.userName)?'':'disabled'}>
+          <label for="curSysAdmin" style="font-size:11px;margin:0;">系統管理員（僅 ${SYSTEM_ADMIN_NAME}）</label>
         </div>
       </div>
     </header>
+    ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到 Claude 雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。若需多人即時共用，需改接正式後端資料庫。</div>` : ''}
     <nav class="tabs">${tabsHtml}</nav>
     <main>${body}</main>
     ${PENDING_CONFIRM ? renderConfirmModal() : ''}
@@ -553,7 +688,7 @@ function renderShell(){
 }
 
 function renderNoAccess(){
-  return `<div class="role-gate">此頁僅限管理員與系統擁有人查看。<br>如需檢視全部逐筆資料，請切換身分或聯絡 WRD 規劃人員。</div>`;
+  return `<div class="role-gate">此頁僅限 WRD 與系統管理員查看。<br>如需檢視全部逐筆資料，請切換群組或聯絡 WRD 規劃人員。</div>`;
 }
 
 function bindShell(){
@@ -561,9 +696,25 @@ function bindShell(){
     b.onclick = ()=>{ VIEW.tab = b.dataset.tab; render(); };
   });
   const curName = document.getElementById('curName');
-  const curRole = document.getElementById('curRole');
-  if(curName) curName.onchange = ()=>{ SESSION.userName = curName.value.trim() || SESSION.userName; render(); };
-  if(curRole) curRole.onchange = ()=>{ SESSION.role = curRole.value; if(!TABS.find(t=>t.id===VIEW.tab).roles.includes(SESSION.role)) VIEW.tab='overview'; render(); };
+  const curGroup = document.getElementById('curGroup');
+  const curSysAdmin = document.getElementById('curSysAdmin');
+  if(curName) curName.onchange = ()=>{
+    const raw = curName.value;
+    if(!validateNameNoInnerSpace(raw)){ alert('姓名中間不可有空格，請重新輸入'); render(); return; }
+    SESSION.userName = raw.trim();
+    if(!isSystemAdminEligible(SESSION.userName)) SESSION.isSystemAdmin = false;
+    render();
+  };
+  if(curGroup) curGroup.onchange = ()=>{
+    SESSION.group = curGroup.value;
+    if(TABS.find(t=>t.id===VIEW.tab).privileged && !isPrivileged()) VIEW.tab='overview';
+    render();
+  };
+  if(curSysAdmin) curSysAdmin.onchange = ()=>{
+    if(curSysAdmin.checked && !isSystemAdminEligible(SESSION.userName)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); render(); return; }
+    SESSION.isSystemAdmin = curSysAdmin.checked;
+    render();
+  };
 
   bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
@@ -638,10 +789,12 @@ function renderMatrix(){
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
       const stylesVal = fc ? fc.styles : '';
       const piecesVal = fc ? fc.pieces : '';
+      const lockedForMe = fc && fc.createdBy !== currentUser() && !isPrivileged();
+      const ro = lockedForMe ? 'readonly title="此資料由其他人輸入，僅 WRD／系統管理員可修改"' : '';
       return `<td>
-        <div class="cellwrap">
-          <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}"></div>
-          <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="pieces" value="${piecesVal}"></div>
+        <div class="cellwrap${lockedForMe?' blank':''}">
+          <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}" ${ro}></div>
+          <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="pieces" value="${piecesVal}" ${ro}></div>
         </div>
       </td>`;
     }).join('');
@@ -696,6 +849,13 @@ function handleMatrixInputChange(inp){
   if(raw!=='' && (isNaN(val))) { alert('請輸入非負整數'); render(); return; }
 
   const existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===weekId && f.status!=='cancelled' && !f.itemRef);
+
+  if(existing && existing.createdBy !== currentUser() && !isPrivileged()){
+    alert('此資料由「'+existing.createdBy+'」輸入，只有 WRD 或系統管理員可以修改他人資料。');
+    render();
+    return;
+  }
+
   let styles = existing ? existing.styles : 0;
   let pieces = existing ? existing.pieces : 0;
   if(field==='styles') styles = val==null? 0 : val;
