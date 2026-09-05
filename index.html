@@ -189,6 +189,28 @@
 <div class="app" id="app"></div>
 <div class="save-hint" id="saveHint">已儲存</div>
 
+<!-- Firebase Firestore 共用資料層：GitHub Pages 外部部署使用 -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  const firebaseConfig = {
+    apiKey: "AIzaSyBeRtl_na0JYa7Ostmbbu1h-xGn881Min0",
+    authDomain: "wsps---zsyd.firebaseapp.com",
+    projectId: "wsps---zsyd",
+    storageBucket: "wsps---zsyd.firebasestorage.app",
+    messagingSenderId: "194308230016",
+    appId: "1:194308230016:web:d70cd0ba1d8e55288fcf65"
+  };
+  try {
+    const db = getFirestore(initializeApp(firebaseConfig));
+    const ref = doc(db, "wsps", "data");
+    window.firebaseGetData = async () => { const snap = await getDoc(ref); return snap.exists() ? snap.data().value : null; };
+    window.firebaseSetData = async (value) => { await setDoc(ref, { value, updatedAt: Date.now() }); };
+    window.firebaseListen = (callback) => onSnapshot(ref, snap => { if (snap.exists()) callback(snap.data().value); });
+    window.firebaseError = null;
+  } catch (error) { window.firebaseError = error; }
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
 <script>
 /* ============================= 常數與預設值 ============================= */
 const STYLE_PER_DAY = 85;
@@ -258,26 +280,23 @@ let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exp
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
-/* 說明：window.storage 是 Claude 內建 Artifact 執行環境才有的雲端共用儲存 API。
-   若此檔案被部署到外部（例如 GitHub Pages），瀏覽器並沒有這個 API，
-   因此以下會自動偵測並改用瀏覽器 localStorage 作為備援，避免資料完全遺失。
-   請注意：localStorage 僅儲存在「該台裝置、該個瀏覽器」內，不會在同事之間同步。
-   若要多人共用同一份即時資料，必須改接正式後端資料庫（見對話中的說明）。 */
+/* 外部部署必須使用 Firebase；不再靜默退回 localStorage，避免同事誤以為資料已同步。 */
 const STORAGE_KEY = 'wsps:data';
 const HAS_CLOUD_STORAGE = (typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function');
-let USING_LOCAL_FALLBACK = !HAS_CLOUD_STORAGE;
+let USING_FIREBASE = false;
+let USING_LOCAL_FALLBACK = false;
+let CLOUD_ERROR = null;
+function requireSharedStorage(){ if(!HAS_CLOUD_STORAGE && !USING_FIREBASE) throw new Error('WSPS 共用資料庫未連線，資料未同步。'); }
 async function storageGet(){
-  if(HAS_CLOUD_STORAGE){
-    return await window.storage.get(STORAGE_KEY, true);
-  }
-  const raw = window.localStorage ? window.localStorage.getItem(STORAGE_KEY) : null;
-  return raw ? {value: raw} : null;
+  if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
+  requireSharedStorage();
+  const value = await window.firebaseGetData();
+  return value ? {value} : null;
 }
 async function storageSet(valueStr){
-  if(HAS_CLOUD_STORAGE){
-    return await window.storage.set(STORAGE_KEY, valueStr, true);
-  }
-  if(window.localStorage) window.localStorage.setItem(STORAGE_KEY, valueStr);
+  if(HAS_CLOUD_STORAGE) return await window.storage.set(STORAGE_KEY, valueStr, true);
+  requireSharedStorage();
+  await window.firebaseSetData(valueStr);
   return {value: valueStr};
 }
 
@@ -296,17 +315,37 @@ async function loadState(){
   runHistoricalImportMigration();
   await persist();
   LOADED = true;
+  if(USING_FIREBASE && window.firebaseListen){
+    window.firebaseListen((valueStr)=>{
+      if(SAVING) return;
+      try{
+        const parsed = JSON.parse(valueStr);
+        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[]}, parsed);
+        render();
+      }catch(e){ console.error('同步資料格式錯誤', e); }
+    });
+  }
 }
 
 async function persist(){
+  let succeeded = false;
   try{
     SAVING = true;
+    CLOUD_ERROR = null;
     await storageSet(JSON.stringify(STATE));
+    succeeded = true;
   }catch(e){
+    CLOUD_ERROR = e;
     console.error('儲存失敗', e);
   }finally{
     SAVING = false;
-    flashSaved();
+    const hint = document.getElementById('saveHint');
+    if(hint){
+      hint.textContent = succeeded ? '已同步' : '未同步：共用資料庫未連線';
+      hint.classList.add('show');
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(()=>hint.classList.remove('show'), 2200);
+    }
   }
 }
 let saveTimer=null;
@@ -1239,6 +1278,19 @@ function bindExport(){
 /* ============================= 啟動 ============================= */
 (async function init(){
   render();
+  if(!HAS_CLOUD_STORAGE){
+    await new Promise(resolve => {
+      if(window.firebaseGetData || window.firebaseError) return resolve();
+      window.addEventListener('firebase-ready', resolve, {once:true});
+      setTimeout(resolve, 5000);
+    });
+    USING_FIREBASE = !!window.firebaseGetData && !window.firebaseError;
+    if(!USING_FIREBASE){
+      CLOUD_ERROR = window.firebaseError || new Error('WSPS 共用資料庫未連線。');
+      const hint = document.getElementById('saveHint');
+      if(hint){ hint.textContent = '未連線：目前不可同步'; hint.classList.add('show'); }
+    }
+  }
   await loadState();
   render();
 })();
