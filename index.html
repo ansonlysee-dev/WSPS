@@ -287,16 +287,22 @@ let USING_FIREBASE = false;
 let USING_LOCAL_FALLBACK = false;
 let CLOUD_ERROR = null;
 function requireSharedStorage(){ if(!HAS_CLOUD_STORAGE && !USING_FIREBASE) throw new Error('WSPS 共用資料庫未連線，資料未同步。'); }
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(()=>reject(new Error((label||'操作')+'逾時（超過 '+(ms/1000)+' 秒無回應），請檢查 Firestore 是否為 Native mode、網路是否被封鎖。')), ms))
+  ]);
+}
 async function storageGet(){
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
   requireSharedStorage();
-  const value = await window.firebaseGetData();
+  const value = await withTimeout(window.firebaseGetData(), 6000, '讀取雲端資料');
   return value ? {value} : null;
 }
 async function storageSet(valueStr){
   if(HAS_CLOUD_STORAGE) return await window.storage.set(STORAGE_KEY, valueStr, true);
   requireSharedStorage();
-  await window.firebaseSetData(valueStr);
+  await withTimeout(window.firebaseSetData(valueStr), 6000, '寫入雲端資料');
   return {value: valueStr};
 }
 
@@ -613,8 +619,9 @@ function render(){
     app.innerHTML = '<div class="role-gate">載入中…</div>';
     return;
   }
+  const errorBanner = CLOUD_ERROR ? `<div class="warn-banner over" style="max-width:420px;margin:20px auto 0;">${(CLOUD_ERROR.message||'共用資料庫連線失敗')}</div>` : '';
   if(!SESSION.userName){
-    app.innerHTML = renderLogin();
+    app.innerHTML = renderLogin() + errorBanner;
     bindLogin();
     return;
   }
