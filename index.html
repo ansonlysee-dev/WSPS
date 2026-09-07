@@ -219,11 +219,13 @@ const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
 
-const GROUPS = {
+const GROUP_LABELS = {
+  WRD: 'WRD',
   BO: 'BO',
-  WRD: 'WRD'
+  PPC: 'PPC',
+  SYSADMIN: '系統管理員'
 };
-const SYSTEM_ADMIN_NAME = 'Anson Tse'; // 系統管理人身份僅此人可勾選
+const SYSTEM_ADMIN_NAME = 'Anson Tse'; // 「系統管理員」此選項僅此人可選擇
 
 const SEED_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","AEO Men","Adidas","Levis China","UQ","ANF","Target","CAL-PD","PPC"];
 
@@ -257,16 +259,14 @@ let SAVING = false;
 
 let SESSION = {
   userName: '',
-  group: 'BO',          // 只分兩組：'WRD' 或 'BO'
-  isSystemAdmin: false  // 系統管理員身份，僅姓名為 Anson Tse 時可勾選
+  group: 'BO'  // 'WRD' | 'BO' | 'PPC' | 'SYSADMIN'（系統管理員僅 Anson Tse 可選）
 };
 
-function isPrivileged(){ // WRD 組或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
-  return SESSION.group === 'WRD' || SESSION.isSystemAdmin;
+function isPrivileged(){ // WRD 或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
+  return SESSION.group === 'WRD' || SESSION.group === 'SYSADMIN';
 }
 function identityLabel(){
-  if(SESSION.isSystemAdmin) return '系統管理員';
-  return SESSION.group === 'WRD' ? 'WRD' : 'BO';
+  return GROUP_LABELS[SESSION.group] || SESSION.group;
 }
 function isSystemAdminEligible(name){
   return (name||'').trim() === SYSTEM_ADMIN_NAME;
@@ -365,32 +365,38 @@ function flashSaved(){
 
 function seedInitialData(){
   STATE.brands = SEED_BRANDS.map(name=>({id:uid('brand'), name, active:true}));
-  // 業務週採「週五至週二」為一週期（非 1-6 或週一至週五），未來 6 個月自動產生預設週別
+  // 業務週採「週六至週五」為一週期（7 個日曆日一週，可跨月），未來 6 個月自動產生預設週別
   const today = new Date();
+  const months = [];
   for(let i=0;i<6;i++){
     const md = new Date(today.getFullYear(), today.getMonth()+i, 1);
     const ym = md.getFullYear()+'-'+pad(md.getMonth()+1);
     const monthId = uid('month');
-    STATE.months.push({id:monthId, ym, pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''});
     const monthStart = new Date(md.getFullYear(), md.getMonth(), 1);
     const monthEnd = new Date(md.getFullYear(), md.getMonth()+1, 0);
-    // 找到當月 1 號當週或之前最近的週五，作為第一個業務週的起點
-    let weekStart = new Date(monthStart);
-    while(weekStart.getDay() !== 5){ weekStart = addDays(weekStart, -1); }
-    while(weekStart <= monthEnd){
-      const weekEnd = addDays(weekStart, 4); // 週五至週二，共 5 個日曆日
-      const clipStart = weekStart < monthStart ? monthStart : weekStart;
-      const clipEnd = weekEnd > monthEnd ? monthEnd : weekEnd;
-      if(clipStart <= clipEnd){
-        const days = Math.round((clipEnd - clipStart) / 86400000) + 1; // 以週期內實際日曆日數作為工作日數，不以 1-6 或週一至週五篩選
-        STATE.weeks.push({
-          id: uid('week'), monthId, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
-          workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
-          overrideReason:'', overrideBy:'', overrideAt:''
-        });
-      }
-      weekStart = addDays(weekStart, 7);
+    months.push({id:monthId, ym, start:monthStart, end:monthEnd});
+    STATE.months.push({id:monthId, ym, pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''});
+  }
+  const rangeStart = months[0].start;
+  const rangeEnd = months[months.length-1].end;
+  // 找到範圍內第一個週六
+  let weekStart = new Date(rangeStart);
+  while(weekStart.getDay() !== 6){ weekStart = addDays(weekStart, -1); }
+  while(weekStart <= rangeEnd){
+    const weekEnd = addDays(weekStart, 6); // 週六至週五，共 7 個日曆日，可跨月
+    const clipStart = weekStart < rangeStart ? rangeStart : weekStart;
+    const clipEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
+    if(clipStart <= clipEnd){
+      // 規劃歸屬月份：以業務週開始日所在月份為預設（管理員可於產能日曆頁面調整）
+      const owner = months.find(m=> clipStart>=m.start && clipStart<=m.end) || months[0];
+      const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
+      STATE.weeks.push({
+        id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
+        workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+        overrideReason:'', overrideBy:'', overrideAt:''
+      });
     }
+    weekStart = addDays(weekStart, 7);
   }
 }
 
@@ -636,43 +642,35 @@ function renderLogin(){
       <div class="zh">Washing Sample Projection System</div>
       <div class="en">WSPS · ZSYD WRD 內部系統</div>
     </div>
-    <p class="muted" style="margin-bottom:18px;">請輸入姓名與群組以繼續。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
+    <p class="muted" style="margin-bottom:18px;">請輸入姓名與部門以繼續。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
     <div class="field" style="margin-bottom:6px;">
       <label>姓名</label>
       <input id="loginName" type="text" placeholder="例如：陳小華" style="width:100%;">
     </div>
     <p class="footnote" style="margin:0 0 14px;">姓名中間不可有空格（例如「Anson Tse」可以，「An son Tse」不可以）。</p>
-    <div class="field" style="margin-bottom:12px;">
-      <label>群組</label>
+    <div class="field" style="margin-bottom:20px;">
+      <label>部門</label>
       <select id="loginGroup" style="width:100%;">
-        <option value="BO">BO</option>
         <option value="WRD">WRD</option>
+        <option value="BO">BO</option>
+        <option value="PPC">PPC</option>
+        <option value="SYSADMIN">系統管理員（僅 ${SYSTEM_ADMIN_NAME} 可選擇）</option>
       </select>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:20px;">
-      <input type="checkbox" id="loginSysAdmin" disabled>
-      <label for="loginSysAdmin" style="font-size:12.5px;margin:0;">系統管理員身份（僅 ${SYSTEM_ADMIN_NAME} 可勾選）</label>
-    </div>
     <button class="btn" id="loginBtn" style="width:100%;">進入系統</button>
-    <p class="footnote" style="margin-top:14px;">BO 僅可見自己逐筆資料並只能修改自己輸入的資料；WRD 與系統管理員可見全部明細、可修改他人資料及管理系統設定。</p>
+    <p class="footnote" style="margin-top:14px;">BO／PPC 僅可見自己逐筆資料並只能修改自己輸入的資料；WRD 與系統管理員可見全部明細、可修改他人資料及管理系統設定。</p>
   </div>`;
 }
 function bindLogin(){
   const nameInput = document.getElementById('loginName');
-  const sysAdminBox = document.getElementById('loginSysAdmin');
-  nameInput.addEventListener('input', ()=>{
-    const eligible = isSystemAdminEligible(nameInput.value);
-    sysAdminBox.disabled = !eligible;
-    if(!eligible) sysAdminBox.checked = false;
-  });
+  const groupSelect = document.getElementById('loginGroup');
   document.getElementById('loginBtn').onclick = ()=>{
     const rawName = nameInput.value;
     if(!validateNameNoInnerSpace(rawName)){ alert('姓名中間不可有空格，請重新輸入'); return; }
     const name = rawName.trim();
-    const group = document.getElementById('loginGroup').value;
-    const wantsSysAdmin = sysAdminBox.checked;
-    if(wantsSysAdmin && !isSystemAdminEligible(name)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); return; }
-    SESSION.userName = name; SESSION.group = group; SESSION.isSystemAdmin = wantsSysAdmin;
+    const group = groupSelect.value;
+    if(group==='SYSADMIN' && !isSystemAdminEligible(name)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); return; }
+    SESSION.userName = name; SESSION.group = group;
     render();
   };
 }
@@ -714,19 +712,18 @@ function renderShell(){
           <input id="curName" value="${SESSION.userName}" style="width:140px;">
         </div>
         <div class="field">
-          <label>群組</label>
+          <label>部門</label>
           <select id="curGroup">
-            <option value="BO" ${SESSION.group==='BO'?'selected':''}>BO</option>
             <option value="WRD" ${SESSION.group==='WRD'?'selected':''}>WRD</option>
+            <option value="BO" ${SESSION.group==='BO'?'selected':''}>BO</option>
+            <option value="PPC" ${SESSION.group==='PPC'?'selected':''}>PPC</option>
+            <option value="SYSADMIN" ${SESSION.group==='SYSADMIN'?'selected':''}>系統管理員（僅 ${SYSTEM_ADMIN_NAME}）</option>
           </select>
-        </div>
-        <div style="display:flex;align-items:center;gap:6px;padding-bottom:7px;">
-          <input type="checkbox" id="curSysAdmin" ${SESSION.isSystemAdmin?'checked':''} ${isSystemAdminEligible(SESSION.userName)?'':'disabled'}>
-          <label for="curSysAdmin" style="font-size:11px;margin:0;">系統管理員（僅 ${SYSTEM_ADMIN_NAME}）</label>
         </div>
       </div>
     </header>
-    ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到 Claude 雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。若需多人即時共用，需改接正式後端資料庫。</div>` : ''}
+    ${USING_FIREBASE ? `<div class="warn-banner" style="margin-top:14px;background:var(--green-soft);border-color:var(--green);color:#2A4E36;">已連接雲端共用資料庫（Firebase），所有同事開啟此網址看到的都是同一份即時資料。</div>` : ''}
+    ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。</div>` : ''}
     <nav class="tabs">${tabsHtml}</nav>
     <main>${body}</main>
     ${PENDING_CONFIRM ? renderConfirmModal() : ''}
@@ -734,7 +731,7 @@ function renderShell(){
 }
 
 function renderNoAccess(){
-  return `<div class="role-gate">此頁僅限 WRD 與系統管理員查看。<br>如需檢視全部逐筆資料，請切換群組或聯絡 WRD 規劃人員。</div>`;
+  return `<div class="role-gate">此頁僅限 WRD 與系統管理員查看。<br>如需檢視全部逐筆資料，請切換部門或聯絡 WRD 規劃人員。</div>`;
 }
 
 function bindShell(){
@@ -743,22 +740,17 @@ function bindShell(){
   });
   const curName = document.getElementById('curName');
   const curGroup = document.getElementById('curGroup');
-  const curSysAdmin = document.getElementById('curSysAdmin');
   if(curName) curName.onchange = ()=>{
     const raw = curName.value;
     if(!validateNameNoInnerSpace(raw)){ alert('姓名中間不可有空格，請重新輸入'); render(); return; }
     SESSION.userName = raw.trim();
-    if(!isSystemAdminEligible(SESSION.userName)) SESSION.isSystemAdmin = false;
+    if(SESSION.group==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)) SESSION.group = 'WRD';
     render();
   };
   if(curGroup) curGroup.onchange = ()=>{
+    if(curGroup.value==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); render(); return; }
     SESSION.group = curGroup.value;
     if(TABS.find(t=>t.id===VIEW.tab).privileged && !isPrivileged()) VIEW.tab='overview';
-    render();
-  };
-  if(curSysAdmin) curSysAdmin.onchange = ()=>{
-    if(curSysAdmin.checked && !isSystemAdminEligible(SESSION.userName)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); render(); return; }
-    SESSION.isSystemAdmin = curSysAdmin.checked;
     render();
   };
 
