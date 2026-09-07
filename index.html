@@ -225,7 +225,7 @@ const GROUP_LABELS = {
   PPC: 'PPC',
   SYSADMIN: '系統管理員'
 };
-const SYSTEM_ADMIN_NAME = 'Anson Tse'; // 「系統管理員」此選項僅此人可選擇
+const SYSTEM_ADMIN_NAME = 'ansontse'; // 「系統管理員」此選項僅此人可選擇（比對時忽略大小寫）
 
 const SEED_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","AEO Men","Adidas","Levis China","UQ","ANF","Target","CAL-PD","PPC"];
 
@@ -268,8 +268,11 @@ function isPrivileged(){ // WRD 或系統管理員 → 可見全部逐筆資料�
 function identityLabel(){
   return GROUP_LABELS[SESSION.group] || SESSION.group;
 }
+function normalizeNameForMatch(name){
+  return (name||'').trim().toLowerCase().replace(/\s+/g,'');
+}
 function isSystemAdminEligible(name){
-  return (name||'').trim() === SYSTEM_ADMIN_NAME;
+  return normalizeNameForMatch(name) === normalizeNameForMatch(SYSTEM_ADMIN_NAME);
 }
 function validateNameNoInnerSpace(name){
   const trimmed = (name||'').trim();
