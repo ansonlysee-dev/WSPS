@@ -1092,6 +1092,11 @@ function renderCalendar(){
     <h1 class="page-title">產能日曆與上限設定</h1>
     <p class="page-sub">建立規劃月份與業務週、設定工作日，並可視需要覆寫上限（需填寫原因）。</p>
     <div class="panel">
+      <h2>重新產生業務週日期格式（週六至週五）</h2>
+      <p class="footnote">系統邏輯已改為「週六至週五」7 日一週期。此按鈕只會清除並重新產生<strong>完全沒有任何已輸入資料</strong>的業務週；只要該週已經有人輸入過款數或件數，就會自動略過、不會被更動或刪除，資料絕對安全。</p>
+      <button class="btn secondary" id="regenWeeksBtn">重新產生無資料的業務週</button>
+    </div>
+    <div class="panel">
       <h2>新增規劃月份</h2>
       <div class="field-row">
         <div class="field"><label>年－月</label><input type="month" id="newMonthYm"></div>
@@ -1114,7 +1119,73 @@ function renderCalendar(){
     </div>
   `;
 }
+function weekHasRealData(weekId){
+  return STATE.forecasts.some(f=>f.weekId===weekId && f.status!=='cancelled');
+}
+function regenerateEmptyFutureWeeks(){
+  const eligibleMonths = STATE.months.filter(m=>{
+    const weeksOfMonth = STATE.weeks.filter(w=>w.monthId===m.id);
+    return weeksOfMonth.length===0 || weeksOfMonth.every(w=>!weekHasRealData(w.id));
+  });
+  if(eligibleMonths.length===0) return {changed:[], skipped: STATE.months.map(m=>m.ym)};
+  eligibleMonths.sort((a,b)=>a.ym.localeCompare(b.ym));
+  // 把連續（相鄰）的合格月份分組，各組各自產生一段連續的週六至週五週期
+  const groups = [];
+  let current = [eligibleMonths[0]];
+  for(let i=1;i<eligibleMonths.length;i++){
+    const prevYm = current[current.length-1].ym;
+    const [py,pm] = prevYm.split('-').map(Number);
+    const expectedNext = (pm===12) ? (py+1)+'-01' : py+'-'+pad(pm+1);
+    if(eligibleMonths[i].ym===expectedNext){ current.push(eligibleMonths[i]); }
+    else { groups.push(current); current=[eligibleMonths[i]]; }
+  }
+  groups.push(current);
+
+  groups.forEach(group=>{
+    // 移除這些月份現有（無資料）的舊業務週
+    const monthIds = new Set(group.map(m=>m.id));
+    STATE.weeks = STATE.weeks.filter(w=>!monthIds.has(w.monthId));
+    const monthMeta = group.map(m=>{
+      const [y,mm] = m.ym.split('-').map(Number);
+      return {id:m.id, ym:m.ym, start:new Date(y,mm-1,1), end:new Date(y,mm,0)};
+    });
+    const rangeStart = monthMeta[0].start;
+    const rangeEnd = monthMeta[monthMeta.length-1].end;
+    let weekStart = new Date(rangeStart);
+    while(weekStart.getDay() !== 6){ weekStart = addDays(weekStart, -1); }
+    while(weekStart <= rangeEnd){
+      const weekEnd = addDays(weekStart, 6);
+      const clipStart = weekStart < rangeStart ? rangeStart : weekStart;
+      const clipEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
+      if(clipStart <= clipEnd){
+        const owner = monthMeta.find(m=> clipStart>=m.start && clipStart<=m.end) || monthMeta[0];
+        const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
+        STATE.weeks.push({
+          id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
+          workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+          overrideReason:'', overrideBy:'', overrideAt:''
+        });
+      }
+      weekStart = addDays(weekStart, 7);
+    }
+  });
+
+  const changed = eligibleMonths.map(m=>m.ym);
+  const skipped = STATE.months.filter(m=>!changed.includes(m.ym)).map(m=>m.ym);
+  return {changed, skipped};
+}
 function bindCalendar(){
+  const regenBtn = document.getElementById('regenWeeksBtn');
+  if(regenBtn) regenBtn.onclick = ()=>{
+    if(!confirm('確定要重新產生所有「完全沒有資料」的業務週嗎？已有資料的月份會自動略過、不受影響。')) return;
+    const result = regenerateEmptyFutureWeeks();
+    persist().then(()=>{
+      render();
+      let msg = '完成。\n已重新產生：' + (result.changed.length? result.changed.join('、') : '（無）');
+      msg += '\n已略過（因已有資料）：' + (result.skipped.length? result.skipped.join('、') : '（無）');
+      alert(msg);
+    });
+  };
   const addMonthBtn = document.getElementById('addMonthBtn');
   if(addMonthBtn) addMonthBtn.onclick = ()=>{
     const val = document.getElementById('newMonthYm').value;
