@@ -321,6 +321,7 @@ async function loadState(){
   }catch(e){
     seedInitialData();
   }
+  runHardResetSept2026Migration();
   runHistoricalImportMigration();
   await persist();
   LOADED = true;
@@ -334,6 +335,54 @@ async function loadState(){
       }catch(e){ console.error('同步資料格式錯誤', e); }
     });
   }
+}
+
+/* 一次性硬重設（依業主明確指示）：清除所有原有月份／業務週／預測資料（客戶主檔保留），
+   改建 2026年9月起、每段 7 天的連續業務週。此遷移以 _hardResetSept2026V1 旗標保護，
+   確保無論哪個使用者先打開新版頁面都只會套用一次，之後不會重複清除。 */
+function runHardResetSept2026Migration(){
+  if(STATE._hardResetSept2026V1) return;
+  STATE.months = [];
+  STATE.weeks = [];
+  STATE.forecasts = [];
+
+  const MONTH_YMS = ['2026-09','2026-10','2026-11','2026-12'];
+  const monthIdByYm = {};
+  MONTH_YMS.forEach(ym=>{
+    const id = uid('month');
+    monthIdByYm[ym] = id;
+    STATE.months.push({id, ym, pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''});
+  });
+
+  const WEEK_LIST = [
+    ['2026-09-04','2026-09-10','2026-09'],
+    ['2026-09-11','2026-09-17','2026-09'],
+    ['2026-09-18','2026-09-24','2026-09'],
+    ['2026-09-25','2026-10-01','2026-09'],
+    ['2026-10-02','2026-10-08','2026-10'],
+    ['2026-10-09','2026-10-15','2026-10'],
+    ['2026-10-16','2026-10-22','2026-10'],
+    ['2026-10-23','2026-10-29','2026-10'],
+    ['2026-10-30','2026-11-05','2026-10'],
+    ['2026-11-06','2026-11-12','2026-11'],
+    ['2026-11-13','2026-11-19','2026-11'],
+    ['2026-11-20','2026-11-26','2026-11'],
+    ['2026-11-27','2026-12-03','2026-11'],
+    ['2026-12-04','2026-12-10','2026-12'],
+    ['2026-12-11','2026-12-17','2026-12'],
+    ['2026-12-18','2026-12-24','2026-12'],
+    ['2026-12-25','2026-12-31','2026-12'],
+  ];
+  WEEK_LIST.forEach(([start,end,ownerYm])=>{
+    STATE.weeks.push({
+      id: uid('week'), monthId: monthIdByYm[ownerYm], startDate:start, endDate:end,
+      workdays:7, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+      overrideReason:'', overrideBy:'', overrideAt:''
+    });
+  });
+
+  STATE._hardResetSept2026V1 = true;
+  STATE._historicalImportV1 = true; // 避免重設後，歷史匯入邏輯又自動補回舊的 8/9 月資料
 }
 
 async function persist(){
