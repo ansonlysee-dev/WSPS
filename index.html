@@ -565,7 +565,7 @@ function runHistoricalImportMigration(){
    8 月：目前系統沒有真實業務週結構，沿用 v1 做法，建立涵蓋全月的匯入用週別。
    9 月：系統已有真實的週六至週五業務週（同事可能已在逐週輸入資料），為避免覆蓋或與逐週數字混淆，
    9 月總數以 itemRef 標記為「歷史匯入」附加在最後一條業務週上，不會佔用/覆蓋逐週輸入的儲格，
-   但仍會計入該週與該月的合計數。此遷移以 _historicalImportV2 旗標保護，只會套用一次。 */
+   但仍會計入該週與該月的合計數。此遷移以 _historicalImportV3 旗標保護，只會套用一次。 */
 const HISTORICAL_V2_MONTHLY = {
   '2026-08': {
     forecast: {
@@ -601,7 +601,7 @@ const HISTORICAL_V2_MONTHLY = {
   }
 };
 function runHistoricalImportV2Migration(){
-  if(STATE._historicalImportV2) return;
+  if(STATE._historicalImportV3) return;
 
   let augMonth = STATE.months.find(m=>m.ym==='2026-08');
   if(!augMonth){
@@ -661,7 +661,7 @@ function runHistoricalImportV2Migration(){
     '9月歷史總計匯入（預計數，來源 Excel，附加於最後一條業務週，不影響逐週輸入儲格）',
     '9月歷史總計匯入（完成數，來源 Excel，附加於最後一條業務週，不影響逐週輸入儲格）');
 
-  STATE._historicalImportV2 = true;
+  STATE._historicalImportV3 = true;
 }
 
 
