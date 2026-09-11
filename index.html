@@ -338,6 +338,7 @@ async function loadState(){
   }
   runHardResetSept2026Migration();
   runHistoricalImportMigration();
+  runHistoricalImportV2Migration();
   await persist();
   LOADED = true;
   if(USING_FIREBASE && window.firebaseListen){
@@ -558,6 +559,111 @@ function runHistoricalImportMigration(){
 
   STATE._historicalImportV1 = true;
 }
+
+/* ============================= 歷史資料匯入 v2（2026-09 更新，含完成數）=============================
+   來源 Excel 已更新，8/9 月預計數與 v1 匯入時不同，且新增「完成數」欄位（配合新增的實質完成數功能）。
+   8 月：目前系統沒有真實業務週結構，沿用 v1 做法，建立涵蓋全月的匯入用週別。
+   9 月：系統已有真實的週六至週五業務週（同事可能已在逐週輸入資料），為避免覆蓋或與逐週數字混淆，
+   9 月總數以 itemRef 標記為「歷史匯入」附加在最後一條業務週上，不會佔用/覆蓋逐週輸入的儲格，
+   但仍會計入該週與該月的合計數。此遷移以 _historicalImportV2 旗標保護，只會套用一次。 */
+const HISTORICAL_V2_MONTHLY = {
+  '2026-08': {
+    forecast: {
+      'Levis Women':[285,2884],'Levis Men':[21,78],'Quetico':[13,120],'AEO Women':[2,4],'Bestseller':[4,8],
+      'Zara':[28,62],'Adidas':[80,215],'Kontoor':[0,0],'CAL-PD(Mathew Wong Team)':[44,135],'PPC-Paul组客户':[4,120],
+      'Levis China':[201,1140],'Joeone':[0,0],'UQ':[83,325],'ANF':[98,351],'AEO Men':[61,232],'GAP':[39,104],
+      'ON':[1,5],'Banana Republic':[26,77],'M&S':[0,0],'Tom Tailor':[0,0],'Target':[270,649],
+      'CAL-PD(Emily Tsoi Team)':[43,88],'PPC-Jonie组客户':[13,116],'Other':[0,0]
+    },
+    completion: {
+      'Levis Women':[359,2302],'Levis Men':[32,116],'Quetico':[11,41],'AEO Women':[1,2],'Bestseller':[0,0],
+      'Zara':[42,86],'Adidas':[88,237],'Kontoor':[0,0],'CAL-PD(Mathew Wong Team)':[43,124],'PPC-Paul组客户':[4,49],
+      'Levis China':[245,1225],'Joeone':[0,0],'UQ':[84,337],'ANF':[98,340],'AEO Men':[65,246],'GAP':[47,114],
+      'ON':[0,0],'Banana Republic':[33,77],'M&S':[0,0],'Tom Tailor':[0,0],'Target':[304,721],
+      'CAL-PD(Emily Tsoi Team)':[29,57],'PPC-Jonie组客户':[12,118],'Other':[0,0]
+    }
+  },
+  '2026-09': {
+    forecast: {
+      'Levis Women':[211,1780],'Levis Men':[10,32],'Quetico':[10,25],'AEO Women':[5,18],'Bestseller':[0,0],
+      'Zara':[7,13],'Adidas':[42,105],'Kontoor':[0,0],'CAL-PD(Mathew Wong Team)':[38,146],'PPC-Paul组客户':[14,240],
+      'Levis China':[151,700],'Joeone':[0,0],'UQ':[115,380],'ANF':[179,643],'AEO Men':[86,320],'GAP':[46,200],
+      'ON':[0,0],'Banana Republic':[41,200],'M&S':[0,0],'Tom Tailor':[0,0],'Target':[206,550],
+      'CAL-PD(Emily Tsoi Team)':[52,109],'PPC-Jonie组客户':[12,132],'Other':[0,0]
+    },
+    completion: {
+      'Levis Women':[71,211],'Levis Men':[16,39],'Quetico':[6,8],'AEO Women':[3,6],'Bestseller':[0,0],
+      'Zara':[7,13],'Adidas':[42,79],'Kontoor':[0,0],'CAL-PD(Mathew Wong Team)':[8,19],'PPC-Paul组客户':[9,158],
+      'Levis China':[86,461],'Joeone':[0,0],'UQ':[38,156],'ANF':[60,224],'AEO Men':[33,111],'GAP':[36,117],
+      'ON':[0,0],'Banana Republic':[32,147],'M&S':[0,0],'Tom Tailor':[0,0],'Target':[97,196],
+      'CAL-PD(Emily Tsoi Team)':[15,26],'PPC-Jonie组客户':[4,52],'Other':[0,0]
+    }
+  }
+};
+function runHistoricalImportV2Migration(){
+  if(STATE._historicalImportV2) return;
+
+  let augMonth = STATE.months.find(m=>m.ym==='2026-08');
+  if(!augMonth){
+    augMonth = {id:uid('month'), ym:'2026-08', pieceCapOverride:null, overrideReason:'', overrideBy:'', overrideAt:''};
+    STATE.months.push(augMonth);
+  }
+  let augWeek = STATE.weeks.find(w=>w.monthId===augMonth.id && w._isMonthlyImportWeek);
+  if(!augWeek){
+    augWeek = {
+      id: uid('week'), monthId: augMonth.id, startDate:'2026-08-01', endDate:'2026-08-31',
+      workdays: monthWorkdays('2026-08'), styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+      overrideReason:'歷史月度資料匯入，未拆分至週', overrideBy:'系統匯入', overrideAt: nowStr(),
+      _isMonthlyImportWeek: true
+    };
+    STATE.weeks.push(augWeek);
+  }
+
+  const sepMonth = STATE.months.find(m=>m.ym==='2026-09');
+  let sepTargetWeek = null;
+  if(sepMonth){
+    const sepWeeks = STATE.weeks.filter(w=>w.monthId===sepMonth.id).sort((a,b)=>b.startDate.localeCompare(a.startDate));
+    sepTargetWeek = sepWeeks[0] || null;
+  }
+
+  const ts = nowStr();
+  function importOneMonth(ym, targetWeek, itemRef, noteForecast, noteCompletion){
+    if(!targetWeek) return;
+    const data = HISTORICAL_V2_MONTHLY[ym];
+    Object.keys(data.forecast).forEach(bn=>{
+      const brand = STATE.brands.find(x=>x.name===bn);
+      if(!brand) return;
+      const [fs, fp] = data.forecast[bn];
+      const [cs, cp] = data.completion[bn];
+      const fcExists = STATE.forecasts.some(f=>f.brandId===brand.id && f.weekId===targetWeek.id && (f.itemRef||'')===itemRef && f.status!=='cancelled');
+      if(!fcExists){
+        STATE.forecasts.push({
+          id: uid('fc'), brandId: brand.id, weekId: targetWeek.id, itemRef, styles:fs, pieces:fp,
+          note: noteForecast, status:'active', createdBy:'系統匯入', createdAt:ts, modifiedBy:'系統匯入', modifiedAt:ts,
+          history:[{at:ts, by:'系統匯入', from:null, to:{styles:fs, pieces:fp}}]
+        });
+      }
+      const cmExists = STATE.completions.some(c=>c.brandId===brand.id && c.weekId===targetWeek.id && (c.itemRef||'')===itemRef && c.status!=='cancelled');
+      if(!cmExists){
+        STATE.completions.push({
+          id: uid('cm'), brandId: brand.id, weekId: targetWeek.id, itemRef, styles:cs, pieces:cp,
+          note: noteCompletion, status:'active', createdBy:'系統匯入', createdAt:ts, modifiedBy:'系統匯入', modifiedAt:ts,
+          history:[{at:ts, by:'系統匯入', from:null, to:{styles:cs, pieces:cp}}]
+        });
+      }
+    });
+  }
+
+  importOneMonth('2026-08', augWeek, '',
+    '8月歷史月度合計匯入（預計數，來源 Excel，未拆分至週）',
+    '8月歷史月度合計匯入（完成數，來源 Excel，未拆分至週）');
+  importOneMonth('2026-09', sepTargetWeek, '歷史匯入-9月總計',
+    '9月歷史總計匯入（預計數，來源 Excel，附加於最後一條業務週，不影響逐週輸入儲格）',
+    '9月歷史總計匯入（完成數，來源 Excel，附加於最後一條業務週，不影響逐週輸入儲格）');
+
+  STATE._historicalImportV2 = true;
+}
+
 
 /* ============================= 計算邏輯 ============================= */
 function weekDefaults(workdays){
