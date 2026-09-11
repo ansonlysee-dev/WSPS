@@ -235,6 +235,20 @@ function pad(n){ return n<10 ? '0'+n : ''+n; }
 function fmtDate(d){ return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
 function parseDate(s){ const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); }
 function addDays(d,n){ const r=new Date(d); r.setDate(r.getDate()+n); return r; }
+function ownerMonthByMajority(clipStart, clipEnd, monthsMeta){
+  // 跨月業務週歸屬規則：以該週落在哪個月份的日子較多為準（多數日子原則），
+  // 該週只會顯示在歸屬的那個月，不會在另一個月重複出現。
+  let best = null, bestCount = -1;
+  monthsMeta.forEach(m=>{
+    const overlapStart = clipStart > m.start ? clipStart : m.start;
+    const overlapEnd = clipEnd < m.end ? clipEnd : m.end;
+    if(overlapStart <= overlapEnd){
+      const count = Math.round((overlapEnd - overlapStart) / 86400000) + 1;
+      if(count > bestCount){ bestCount = count; best = m; }
+    }
+  });
+  return best;
+}
 function monthLabel(ym){ const [y,m]=ym.split('-'); return y+'年'+parseInt(m,10)+'月'; }
 function nowStr(){ const d=new Date(); return fmtDate(d)+' '+pad(d.getHours())+':'+pad(d.getMinutes()); }
 function escapeCsv(v){ if(v==null) return ''; const s=String(v); return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s; }
@@ -252,7 +266,8 @@ let STATE = {
   brands: [],
   months: [],   // {id, ym:'2026-09', label, pieceCapOverride, overrideReason, overrideBy, overrideAt}
   weeks: [],    // {id, monthId, startDate, endDate, workdays, styleCapOverride, pieceCapPlanOverride, pieceCapOpsOverride, overrideReason, overrideBy, overrideAt}
-  forecasts: [] // {id, brandId, weekId, itemRef, styles, pieces, note, status, createdBy, createdAt, modifiedBy, modifiedAt, history:[]}
+  forecasts: [], // {id, brandId, weekId, itemRef, styles, pieces, note, status, createdBy, createdAt, modifiedBy, modifiedAt, history:[]}
+  completions: [] // 實質完成數，結構同 forecasts 一樣，僅 WRD／系統管理員可輸入與查看
 };
 let LOADED = false;
 let SAVING = false;
@@ -279,7 +294,7 @@ function validateNameNoInnerSpace(name){
   return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
 }
 
-let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null };
+let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -314,7 +329,7 @@ async function loadState(){
     const r = await storageGet();
     if(r && r.value){
       const parsed = JSON.parse(r.value);
-      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[]}, parsed);
+      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
     } else {
       seedInitialData();
     }
@@ -330,7 +345,7 @@ async function loadState(){
       if(SAVING) return;
       try{
         const parsed = JSON.parse(valueStr);
-        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[]}, parsed);
+        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
         render();
       }catch(e){ console.error('同步資料格式錯誤', e); }
     });
@@ -363,7 +378,7 @@ function runHardResetSept2026Migration(){
     ['2026-10-09','2026-10-15','2026-10'],
     ['2026-10-16','2026-10-22','2026-10'],
     ['2026-10-23','2026-10-29','2026-10'],
-    ['2026-10-30','2026-11-05','2026-10'],
+    ['2026-10-30','2026-11-05','2026-11'],
     ['2026-11-06','2026-11-12','2026-11'],
     ['2026-11-13','2026-11-19','2026-11'],
     ['2026-11-20','2026-11-26','2026-11'],
@@ -440,7 +455,7 @@ function seedInitialData(){
     const clipEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
     if(clipStart <= clipEnd){
       // 規劃歸屬月份：以業務週開始日所在月份為預設（管理員可於產能日曆頁面調整）
-      const owner = months.find(m=> clipStart>=m.start && clipStart<=m.end) || months[0];
+      const owner = ownerMonthByMajority(clipStart, clipEnd, months) || months[0];
       const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
       STATE.weeks.push({
         id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
@@ -670,6 +685,54 @@ function cancelForecast(id){
   f.status='cancelled'; f.modifiedBy=currentUser(); f.modifiedAt=nowStr();
 }
 
+/* ============================= 實質完成數（僅 WRD／系統管理員）============================= */
+function completionsForWeek(weekId){
+  return STATE.completions.filter(c=>c.weekId===weekId && c.status!=='cancelled');
+}
+function weekCompletionTotals(weekId){
+  const cs = completionsForWeek(weekId).filter(c=>!c.itemRef);
+  return {
+    styles: cs.reduce((s,c)=>s+(c.styles||0),0),
+    pieces: cs.reduce((s,c)=>s+(c.pieces||0),0)
+  };
+}
+function upsertCompletion({brandId, weekId, itemRef, styles, pieces, note}){
+  itemRef = itemRef || '';
+  let existing = STATE.completions.find(c=>c.brandId===brandId && c.weekId===weekId && (c.itemRef||'')===itemRef && c.status!=='cancelled');
+  const ts = nowStr();
+  if(existing){
+    existing.history = existing.history || [];
+    existing.history.push({at:ts, by:currentUser(), from:{styles:existing.styles, pieces:existing.pieces, note:existing.note}, to:{styles, pieces, note}});
+    existing.styles = styles; existing.pieces = pieces; existing.note = note;
+    existing.modifiedBy = currentUser(); existing.modifiedAt = ts;
+  } else {
+    existing = {
+      id: uid('cm'), brandId, weekId, itemRef, styles, pieces, note,
+      status: 'active',
+      createdBy: currentUser(), createdAt: ts, modifiedBy: currentUser(), modifiedAt: ts,
+      history: [{at:ts, by:currentUser(), from:null, to:{styles,pieces,note}}]
+    };
+    STATE.completions.push(existing);
+  }
+  return existing;
+}
+function variancePct(actual, forecast){
+  if(!forecast) return null; // 預測數為 0 或未填報時，相差率沒有意義
+  return ((actual - forecast) / forecast) * 100;
+}
+function fmtVariance(v){
+  if(v==null) return '—';
+  const sign = v>0 ? '+' : '';
+  return sign + v.toFixed(1) + '%';
+}
+function varianceClass(v){
+  if(v==null) return '';
+  if(v <= -20) return 'over'; // 完成度嚴重落後
+  if(v <= -5) return 'at';
+  if(v < 0) return 'near';
+  return ''; // 達標或超標，不特別標色
+}
+
 /* ============================= 渲染框架 ============================= */
 function render(){
   const app = document.getElementById('app');
@@ -732,6 +795,8 @@ const TABS = [
   {id:'matrix', label:'月度預測輸入', privileged:false},
   {id:'weekly', label:'週度明細', privileged:true},
   {id:'mine', label:'我的預測', privileged:false},
+  {id:'completion', label:'實質完成數輸入', privileged:true},
+  {id:'comparison', label:'完成數對比預測數', privileged:true},
   {id:'calendar', label:'產能日曆與上限設定', privileged:true},
   {id:'brands', label:'客戶／品牌管理', privileged:true},
   {id:'export', label:'匯出', privileged:true},
@@ -747,6 +812,8 @@ function renderShell(){
     case 'matrix': body = renderMatrix(); break;
     case 'weekly': body = !isPrivileged() ? renderNoAccess() : renderWeekly(); break;
     case 'mine': body = renderMine(); break;
+    case 'completion': body = !isPrivileged() ? renderNoAccess() : renderCompletion(); break;
+    case 'comparison': body = !isPrivileged() ? renderNoAccess() : renderComparison(); break;
     case 'calendar': body = !isPrivileged() ? renderNoAccess() : renderCalendar(); break;
     case 'brands': body = !isPrivileged() ? renderNoAccess() : renderBrands(); break;
     case 'export': body = !isPrivileged() ? renderNoAccess() : renderExport(); break;
@@ -806,7 +873,7 @@ function bindShell(){
     render();
   };
 
-  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
+  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
 
 /* ============================= 總覽 ============================= */
@@ -1098,6 +1165,127 @@ function bindMine(){
   });
 }
 
+/* ============================= 實質完成數輸入（僅 WRD／系統管理員）============================= */
+function renderCompletion(){
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份，請先於「產能日曆與上限設定」建立。</div>`;
+  if(!VIEW.completionMonthId || !months.find(m=>m.id===VIEW.completionMonthId)) VIEW.completionMonthId = months[0].id;
+  const month = months.find(m=>m.id===VIEW.completionMonthId);
+  const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const brands = STATE.brands.filter(b=>b.active);
+
+  const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-compmonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
+  const headerCells = weeks.map(w=>`<th style="min-width:130px;">${weekLabel(w)}</th>`).join('');
+
+  const rows = brands.map(brand=>{
+    const cells = weeks.map(w=>{
+      const cm = STATE.completions.find(c=>c.brandId===brand.id && c.weekId===w.id && c.status!=='cancelled' && !c.itemRef);
+      const stylesVal = cm ? cm.styles : '';
+      const piecesVal = cm ? cm.pieces : '';
+      return `<td>
+        <div class="cellwrap">
+          <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="styles" value="${stylesVal}"></div>
+          <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="pieces" value="${piecesVal}"></div>
+        </div>
+      </td>`;
+    }).join('');
+    const rowMonthTotal = weeks.reduce((s,w)=>{
+      const cm = STATE.completions.find(c=>c.brandId===brand.id && c.weekId===w.id && c.status!=='cancelled' && !c.itemRef);
+      return s + (cm ? cm.pieces||0 : 0);
+    },0);
+    return `<tr><td class="brandcol">${brand.name}</td>${cells}<td class="rowtotal">${rowMonthTotal.toLocaleString()} 件</td></tr>`;
+  }).join('');
+
+  const monthTot = (()=>{ let styles=0, pieces=0; weeks.forEach(w=>{ const t=weekCompletionTotals(w.id); styles+=t.styles; pieces+=t.pieces; }); return {styles,pieces}; })();
+
+  return `
+    <h1 class="page-title">實質完成數輸入</h1>
+    <p class="page-sub">記錄各客戶／品牌每個業務週實際完成的款數與件數。此頁僅 WRD、系統管理員可見及輸入。</p>
+    <div class="pill-row">${pillHtml}</div>
+    <div class="toolbar">
+      <div class="muted">月度完成合計：<strong class="num">${monthTot.pieces.toLocaleString()}</strong> 件 ／ <strong class="num">${monthTot.styles.toLocaleString()}</strong> 款</div>
+      <div class="muted footnote">留空表示尚未回報；填 0 表示確認本週無完成量。</div>
+    </div>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead><tr><th class="brandcol">客戶／品牌</th>${headerCells}<th style="min-width:100px;">月度合計</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="${weeks.length+2}" class="empty">尚無啟用中的客戶／品牌</td></tr>`}</tbody>
+      </table>
+    </div>
+  `;
+}
+function bindCompletion(){
+  document.querySelectorAll('[data-compmonthpill]').forEach(p=>{
+    p.onclick = ()=>{ VIEW.completionMonthId = p.dataset.compmonthpill; render(); };
+  });
+  document.querySelectorAll('table.matrix input[data-cbrand]').forEach(inp=>{
+    inp.addEventListener('change', ()=>{
+      const brandId = inp.dataset.cbrand, weekId = inp.dataset.cweek, field = inp.dataset.cfield;
+      const raw = inp.value.trim();
+      const val = raw==='' ? null : Math.max(0, Math.floor(Number(raw)));
+      if(raw!=='' && isNaN(val)){ alert('請輸入非負整數'); render(); return; }
+      const existing = STATE.completions.find(c=>c.brandId===brandId && c.weekId===weekId && c.status!=='cancelled' && !c.itemRef);
+      if(!existing && val==null){ render(); return; }
+      let styles = existing ? existing.styles : 0;
+      let pieces = existing ? existing.pieces : 0;
+      if(field==='styles') styles = val==null ? 0 : val;
+      if(field==='pieces') pieces = val==null ? 0 : val;
+      upsertCompletion({brandId, weekId, itemRef:'', styles, pieces, note:''});
+      persist().then(render);
+    });
+  });
+}
+
+/* ============================= 完成數對比預測數（僅 WRD／系統管理員）============================= */
+function renderComparison(){
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份，請先於「產能日曆與上限設定」建立。</div>`;
+  if(!VIEW.comparisonMonthId || !months.find(m=>m.id===VIEW.comparisonMonthId)) VIEW.comparisonMonthId = months[0].id;
+  const month = months.find(m=>m.id===VIEW.comparisonMonthId);
+  const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const brands = STATE.brands.filter(b=>b.active);
+
+  const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-cmpmonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
+  const headerCells = weeks.map(w=>`<th style="min-width:150px;">${weekLabel(w)}</th>`).join('');
+
+  const rows = brands.map(brand=>{
+    const cells = weeks.map(w=>{
+      const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
+      const cm = STATE.completions.find(c=>c.brandId===brand.id && c.weekId===w.id && c.status!=='cancelled' && !c.itemRef);
+      const fStyles = fc ? fc.styles : null, fPieces = fc ? fc.pieces : null;
+      const cStyles = cm ? cm.styles : null, cPieces = cm ? cm.pieces : null;
+      const vStyles = (fStyles!=null && cStyles!=null) ? variancePct(cStyles, fStyles) : null;
+      const vPieces = (fPieces!=null && cPieces!=null) ? variancePct(cPieces, fPieces) : null;
+      return `<td>
+        <div class="cellwrap" style="min-width:140px;">
+          <div class="footnote">預測：${fStyles!=null?fStyles:'—'} 款／${fPieces!=null?fPieces:'—'} 件</div>
+          <div class="footnote">完成：${cStyles!=null?cStyles:'—'} 款／${cPieces!=null?cPieces:'—'} 件</div>
+          <div class="footnote">差異：<span class="status-chip ${varianceClass(vStyles)}" style="padding:0 4px;">款 ${fmtVariance(vStyles)}</span> <span class="status-chip ${varianceClass(vPieces)}" style="padding:0 4px;">件 ${fmtVariance(vPieces)}</span></div>
+        </div>
+      </td>`;
+    }).join('');
+    return `<tr><td class="brandcol">${brand.name}</td>${cells}</tr>`;
+  }).join('');
+
+  return `
+    <h1 class="page-title">完成數對比預測數</h1>
+    <p class="page-sub">逐客戶、逐業務週比較預測數與實質完成數，差異率 = (完成數 − 預測數) ÷ 預測數 × 100%。此頁僅 WRD、系統管理員可見。</p>
+    <div class="pill-row">${pillHtml}</div>
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead><tr><th class="brandcol">客戶／品牌</th>${headerCells}</tr></thead>
+        <tbody>${rows || `<tr><td colspan="${weeks.length+1}" class="empty">尚無啟用中的客戶／品牌</td></tr>`}</tbody>
+      </table>
+    </div>
+    <p class="footnote">差異率為負代表完成數低於預測（落後）；為正代表完成數高於預測（超額完成）。落後 5% 以上會標黃、落後 20% 以上會標紅，方便快速找出偏差較大的客戶／週別。</p>
+  `;
+}
+function bindComparison(){
+  document.querySelectorAll('[data-cmpmonthpill]').forEach(p=>{
+    p.onclick = ()=>{ VIEW.comparisonMonthId = p.dataset.cmpmonthpill; render(); };
+  });
+}
+
 /* ============================= 產能日曆與上限設定 ============================= */
 function renderCalendar(){
   const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
@@ -1207,7 +1395,7 @@ function regenerateEmptyFutureWeeks(){
       const clipStart = weekStart < rangeStart ? rangeStart : weekStart;
       const clipEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
       if(clipStart <= clipEnd){
-        const owner = monthMeta.find(m=> clipStart>=m.start && clipStart<=m.end) || monthMeta[0];
+        const owner = ownerMonthByMajority(clipStart, clipEnd, monthMeta) || monthMeta[0];
         const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
         STATE.weeks.push({
           id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
