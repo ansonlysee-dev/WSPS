@@ -1434,6 +1434,11 @@ function renderCalendar(){
   return `
     <h1 class="page-title">產能日曆與上限設定</h1>
     <p class="page-sub">建立規劃月份與業務週、設定工作日，並可視需要覆寫上限（需填寫原因）。</p>
+    <div class="panel" style="border-color:var(--red);">
+      <h2 style="color:var(--red);">危險操作：清除所有已輸入資料</h2>
+      <p class="footnote">清除<strong>所有</strong>預測數與完成數逐筆紀錄（包括歷史匯入的資料），但會保留月份、業務週結構與客戶／品牌名單。此操作不可復原，建議先到「匯出」頁面備份 CSV。</p>
+      <button class="btn danger" id="clearAllDataBtn">清除所有已輸入資料（預測數＋完成數）</button>
+    </div>
     <div class="panel">
       <h2>重新產生業務週日期格式（週六至週五）</h2>
       <p class="footnote">系統邏輯已改為「週六至週五」7 日一週期。此按鈕只會清除並重新產生<strong>完全沒有任何已輸入資料</strong>的業務週；只要該週已經有人輸入過款數或件數，就會自動略過、不會被更動或刪除，資料絕對安全。</p>
@@ -1518,6 +1523,17 @@ function regenerateEmptyFutureWeeks(){
   return {changed, skipped};
 }
 function bindCalendar(){
+  const clearAllBtn = document.getElementById('clearAllDataBtn');
+  if(clearAllBtn) clearAllBtn.onclick = ()=>{
+    if(!confirm('確定要清除所有已輸入的預測數與完成數嗎？（包括歷史匯入的資料）月份、業務週與客戶名單會保留。此操作不可復原。')) return;
+    if(!confirm('再次確認：這會清空全部同事已輸入的數字，確定要繼續嗎？')) return;
+    STATE.forecasts = [];
+    STATE.completions = [];
+    persist().then(()=>{
+      render();
+      alert('已清除所有預測數與完成數。月份、業務週與客戶名單維持不變。');
+    });
+  };
   const regenBtn = document.getElementById('regenWeeksBtn');
   if(regenBtn) regenBtn.onclick = ()=>{
     if(!confirm('確定要重新產生所有「完全沒有資料」的業務週嗎？已有資料的月份會自動略過、不受影響。')) return;
