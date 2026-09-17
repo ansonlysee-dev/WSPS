@@ -184,6 +184,7 @@
   .audit{font-size:11px;color:var(--ink-soft);}
   select.status-select{font-size:11.5px;}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div class="app" id="app"></div>
@@ -294,7 +295,7 @@ function validateNameNoInnerSpace(name){
   return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
 }
 
-let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null };
+let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -821,6 +822,12 @@ function monthTotals(month){
   weeks.forEach(w=>{ const t=weekTotals(w.id); styles+=t.styles; pieces+=t.pieces; });
   return {styles, pieces};
 }
+function monthCompletionTotals(month){
+  const weeks = STATE.weeks.filter(w=>w.monthId===month.id);
+  let styles=0, pieces=0;
+  weeks.forEach(w=>{ const t=weekCompletionTotals(w.id); styles+=t.styles; pieces+=t.pieces; });
+  return {styles, pieces};
+}
 function monthStatus(month){
   const caps = monthCaps(month);
   const tot = monthTotals(month);
@@ -992,6 +999,8 @@ const TABS = [
   {id:'mine', label:'我的預測', privileged:false},
   {id:'completion', label:'實質完成數輸入', privileged:true},
   {id:'comparison', label:'完成數對比預測數', privileged:true},
+  {id:'trend', label:'完成率趨勢', privileged:true},
+  {id:'audit', label:'修改記錄', privileged:true},
   {id:'calendar', label:'產能日曆與上限設定', privileged:true},
   {id:'brands', label:'客戶／品牌管理', privileged:true},
   {id:'export', label:'匯出', privileged:true},
@@ -1009,6 +1018,8 @@ function renderShell(){
     case 'mine': body = renderMine(); break;
     case 'completion': body = !isPrivileged() ? renderNoAccess() : renderCompletion(); break;
     case 'comparison': body = !isPrivileged() ? renderNoAccess() : renderComparison(); break;
+    case 'trend': body = !isPrivileged() ? renderNoAccess() : renderTrend(); break;
+    case 'audit': body = !isPrivileged() ? renderNoAccess() : renderAudit(); break;
     case 'calendar': body = !isPrivileged() ? renderNoAccess() : renderCalendar(); break;
     case 'brands': body = !isPrivileged() ? renderNoAccess() : renderBrands(); break;
     case 'export': body = !isPrivileged() ? renderNoAccess() : renderExport(); break;
@@ -1068,7 +1079,7 @@ function bindShell(){
     render();
   };
 
-  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
+  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
 
 /* ============================= 總覽 ============================= */
@@ -1481,6 +1492,120 @@ function bindComparison(){
   });
 }
 
+/* ============================= 完成率趨勢（僅 WRD／系統管理員）============================= */
+function renderTrend(){
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份。</div>`;
+
+  const monthRates = months.map(m=>{
+    const f = monthTotals(m), c = monthCompletionTotals(m);
+    const rate = f.pieces>0 ? (c.pieces/f.pieces*100) : null;
+    return {ym:m.ym, id:m.id, forecast:f, completion:c, rate};
+  });
+  const maxRate = Math.max(100, ...monthRates.map(r=>r.rate||0));
+  const barW = 64, gap = 28, chartH = 220, leftPad = 50, topPad = 20;
+  const chartW = leftPad + monthRates.length*(barW+gap);
+  const bars = monthRates.map((r,i)=>{
+    const x = leftPad + i*(barW+gap);
+    const h = r.rate==null ? 0 : Math.round((r.rate/maxRate)*chartH);
+    const y = topPad + chartH - h;
+    const color = r.rate==null ? '#DAD6CC' : (r.rate<70 ? 'var(--red)' : r.rate<95 ? 'var(--amber)' : 'var(--green)');
+    return `
+      <rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${color}" rx="2"></rect>
+      <text x="${x+barW/2}" y="${topPad+chartH+18}" text-anchor="middle" font-size="11" fill="var(--ink-soft)">${monthLabel(r.ym).replace('年','/').replace('月','')}</text>
+      <text x="${x+barW/2}" y="${y-6}" text-anchor="middle" font-size="11" font-weight="600" fill="var(--ink)">${r.rate==null?'—':r.rate.toFixed(0)+'%'}</text>
+    `;
+  }).join('');
+  const refY100 = topPad + chartH - Math.round((100/maxRate)*chartH);
+
+  const svg = `
+    <svg viewBox="0 0 ${chartW+20} ${topPad+chartH+40}" style="width:100%;max-width:760px;height:auto;font-family:'IBM Plex Mono',monospace;">
+      <line x1="${leftPad-10}" y1="${refY100}" x2="${chartW+10}" y2="${refY100}" stroke="var(--line)" stroke-dasharray="4,3"></line>
+      <text x="${leftPad-14}" y="${refY100+4}" text-anchor="end" font-size="10" fill="var(--ink-soft)">100%</text>
+      ${bars}
+    </svg>`;
+
+  if(!VIEW.trendMonthId || !months.find(m=>m.id===VIEW.trendMonthId)) VIEW.trendMonthId = months[months.length-1].id;
+  const selMonth = months.find(m=>m.id===VIEW.trendMonthId);
+  const brands = STATE.brands.filter(b=>b.active);
+  const weeksOfMonth = STATE.weeks.filter(w=>w.monthId===selMonth.id);
+  const brandRows = brands.map(brand=>{
+    let f=0, c=0;
+    weeksOfMonth.forEach(w=>{
+      STATE.forecasts.filter(x=>x.brandId===brand.id && x.weekId===w.id && x.status!=='cancelled').forEach(x=>f+=x.pieces||0);
+      STATE.completions.filter(x=>x.brandId===brand.id && x.weekId===w.id && x.status!=='cancelled').forEach(x=>c+=x.pieces||0);
+    });
+    const rate = f>0 ? (c/f*100) : null;
+    return {name:brand.name, f, c, rate};
+  }).filter(r=>r.f>0).sort((a,b)=>(a.rate??999)-(b.rate??999));
+
+  const pillHtml = months.map(m=>`<div class="pill ${m.id===selMonth.id?'active':''}" data-trendmonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
+  const rowsHtml = brandRows.map(r=>`
+    <tr>
+      <td>${r.name}</td>
+      <td class="num">${r.f.toLocaleString()}</td>
+      <td class="num">${r.c.toLocaleString()}</td>
+      <td><span class="status-chip ${varianceClass(r.rate==null?null:r.rate-100)}">${r.rate==null?'—':r.rate.toFixed(0)+'%'}</span></td>
+    </tr>`).join('');
+
+  return `
+    <h1 class="page-title">完成率趨勢</h1>
+    <p class="page-sub">各月整體完成率（完成件數 ÷ 預測件數），用於觀察長期系統性偏差；下方可依月份查看各客戶完成率，找出持續偏低的客戶。</p>
+    <div class="panel">${svg}</div>
+    <div class="pill-row">${pillHtml}</div>
+    <div class="panel">
+      <h2>${monthLabel(selMonth.ym)}　各客戶完成率（由低至高排序，僅列有預測數的客戶）</h2>
+      <table class="plain">
+        <thead><tr><th>客戶／品牌</th><th>預測件數</th><th>完成件數</th><th>完成率</th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="4" class="empty">本月尚無可比較的資料</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+}
+function bindTrend(){
+  document.querySelectorAll('[data-trendmonthpill]').forEach(p=>{
+    p.onclick = ()=>{ VIEW.trendMonthId = p.dataset.trendmonthpill; render(); };
+  });
+}
+
+/* ============================= 修改記錄（僅 WRD／系統管理員）============================= */
+function renderAudit(){
+  const entries = [];
+  STATE.forecasts.forEach(f=>{
+    (f.history||[]).forEach(h=>entries.push({type:'預測數', brandId:f.brandId, weekId:f.weekId, itemRef:f.itemRef, ...h}));
+  });
+  STATE.completions.forEach(c=>{
+    (c.history||[]).forEach(h=>entries.push({type:'完成數', brandId:c.brandId, weekId:c.weekId, itemRef:c.itemRef, ...h}));
+  });
+  entries.sort((a,b)=>b.at.localeCompare(a.at));
+  const limited = entries.slice(0, 300);
+
+  const rows = limited.map(e=>{
+    const week = STATE.weeks.find(w=>w.id===e.weekId);
+    const fromStr = e.from ? (e.from.styles!=null ? `${e.from.styles}款／${e.from.pieces}件` : JSON.stringify(e.from)) : '（新建）';
+    const toStr = e.to ? (e.to.styles!=null ? `${e.to.styles}款／${e.to.pieces}件` : JSON.stringify(e.to)) : '—';
+    return `
+      <tr>
+        <td class="audit">${e.at}</td>
+        <td>${e.by}</td>
+        <td><span class="badge">${e.type}</span></td>
+        <td>${brandName(e.brandId)}${e.itemRef?'<div class="footnote">項目：'+e.itemRef+'</div>':''}</td>
+        <td>${week?weekLabel(week):'—'}</td>
+        <td class="footnote">${fromStr} → ${toStr}</td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <h1 class="page-title">修改記錄</h1>
+    <p class="page-sub">追溯所有預測數與完成數的新增／修改紀錄，最新在最上方（最多顯示 300 筆）。</p>
+    <table class="plain">
+      <thead><tr><th>時間</th><th>使用者</th><th>類型</th><th>客戶／品牌</th><th>業務週</th><th>變更內容</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="empty">尚無修改記錄</td></tr>'}</tbody>
+    </table>
+  `;
+}
+function bindAudit(){}
+
 /* ============================= 產能日曆與上限設定 ============================= */
 function renderCalendar(){
   const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
@@ -1767,32 +1892,112 @@ function renderExport(){
   const options = months.map(m=>`<option value="${m.id}">${monthLabel(m.ym)}</option>`).join('');
   return `
     <h1 class="page-title">匯出</h1>
-    <p class="page-sub">匯出目前篩選範圍內的逐筆預測資料為 CSV，供會議、追溯與離線分析使用。</p>
-    <div class="field-row">
-      <div class="field"><label>選擇月份</label><select id="exportMonth"><option value="">全部月份</option>${options}</select></div>
-      <button class="btn" id="exportBtn">匯出 CSV</button>
+    <p class="page-sub">匯出目前篩選範圍內的逐筆資料，供會議、追溯與離線分析使用。</p>
+    <div class="panel">
+      <h2>逐筆資料匯出</h2>
+      <div class="field-row">
+        <div class="field"><label>資料類型</label>
+          <select id="exportType">
+            <option value="forecast">預測數</option>
+            <option value="completion">完成數</option>
+          </select>
+        </div>
+        <div class="field"><label>選擇月份</label><select id="exportMonth"><option value="">全部月份</option>${options}</select></div>
+        <button class="btn secondary" id="exportBtn">匯出 CSV</button>
+        <button class="btn secondary" id="exportXlsxBtn">匯出 Excel（.xlsx）</button>
+      </div>
+      <p class="footnote">匯出內容包含客戶／品牌、業務週、款數、件數、狀態、建立與修改人員及時間，與畫面篩選範圍一致。</p>
     </div>
-    <p class="footnote">匯出內容包含客戶／品牌、業務週、款數、件數、狀態、建立與修改人員及時間，與畫面篩選範圍一致。</p>
+    <div class="panel">
+      <h2>完整備份（JSON）</h2>
+      <p class="footnote">匯出整個系統目前的完整資料快照（月份、業務週、客戶、預測數、完成數），可用於還原資料或留存備份。建議定期匯出，避免意外覆蓋時無法復原。</p>
+      <div class="field-row">
+        <button class="btn secondary" id="exportBackupBtn">匯出完整備份</button>
+      </div>
+    </div>
+    <div class="panel" style="border-color:var(--red);">
+      <h2 style="color:var(--red);">還原備份</h2>
+      <p class="footnote">上傳先前匯出的完整備份 JSON 檔案，將會<strong>完全覆蓋</strong>目前系統上的所有資料。此操作不可復原，請謹慎使用。</p>
+      <div class="field-row">
+        <input type="file" id="restoreFileInput" accept="application/json">
+        <button class="btn danger" id="restoreBackupBtn">還原此備份</button>
+      </div>
+    </div>
   `;
 }
 function bindExport(){
-  const btn = document.getElementById('exportBtn');
-  if(!btn) return;
-  btn.onclick = ()=>{
-    const monthId = document.getElementById('exportMonth').value;
-    let fs = STATE.forecasts.filter(f=>f.status!=='cancelled');
+  const monthIdFor = ()=> document.getElementById('exportMonth').value;
+  const typeFor = ()=> document.getElementById('exportType').value;
+
+  function filteredRecords(){
+    const type = typeFor();
+    const source = type==='completion' ? STATE.completions : STATE.forecasts;
+    let rs = source.filter(f=>f.status!=='cancelled');
+    const monthId = monthIdFor();
     if(monthId){
       const weekIds = new Set(STATE.weeks.filter(w=>w.monthId===monthId).map(w=>w.id));
-      fs = fs.filter(f=>weekIds.has(f.weekId));
+      rs = rs.filter(f=>weekIds.has(f.weekId));
     }
+    return {type, rs};
+  }
+  function toRows(type, rs){
     const rows = [['客戶／品牌','業務週起','業務週迄','規劃月份','項目參考','款數','件數','狀態','備註','建立人','建立時間','最後修改人','最後修改時間']];
-    fs.forEach(f=>{
+    rs.forEach(f=>{
       const week = STATE.weeks.find(w=>w.id===f.weekId);
       const month = week? STATE.months.find(m=>m.id===week.monthId) : null;
       rows.push([brandName(f.brandId), week?week.startDate:'', week?week.endDate:'', month?monthLabel(month.ym):'',
         f.itemRef||'', f.styles, f.pieces, statusLabel(f.status), f.note||'', f.createdBy, f.createdAt, f.modifiedBy, f.modifiedAt]);
     });
-    downloadCsv('WSPS_forecast_export_'+fmtDate(new Date())+'.csv', rows);
+    return rows;
+  }
+
+  const btn = document.getElementById('exportBtn');
+  if(btn) btn.onclick = ()=>{
+    const {type, rs} = filteredRecords();
+    downloadCsv('WSPS_'+(type==='completion'?'completion':'forecast')+'_export_'+fmtDate(new Date())+'.csv', toRows(type, rs));
+  };
+
+  const xlsxBtn = document.getElementById('exportXlsxBtn');
+  if(xlsxBtn) xlsxBtn.onclick = ()=>{
+    if(typeof XLSX === 'undefined'){ alert('Excel 匯出元件載入失敗，請檢查網路連線後重試，或改用 CSV 匯出。'); return; }
+    const {type, rs} = filteredRecords();
+    const rows = toRows(type, rs);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, type==='completion'?'完成數':'預測數');
+    XLSX.writeFile(wb, 'WSPS_'+(type==='completion'?'completion':'forecast')+'_export_'+fmtDate(new Date())+'.xlsx');
+  };
+
+  const backupBtn = document.getElementById('exportBackupBtn');
+  if(backupBtn) backupBtn.onclick = ()=>{
+    const blob = new Blob([JSON.stringify(STATE, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'WSPS_backup_'+fmtDate(new Date())+'.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const restoreBtn = document.getElementById('restoreBackupBtn');
+  if(restoreBtn) restoreBtn.onclick = ()=>{
+    const input = document.getElementById('restoreFileInput');
+    const file = input.files && input.files[0];
+    if(!file){ alert('請先選擇備份檔案'); return; }
+    if(!confirm('確定要用此備份完全覆蓋目前系統上的所有資料嗎？此操作不可復原。')) return;
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      try{
+        const parsed = JSON.parse(e.target.result);
+        if(!parsed || !Array.isArray(parsed.brands) || !Array.isArray(parsed.months) || !Array.isArray(parsed.weeks)){
+          alert('檔案格式不正確，無法還原。'); return;
+        }
+        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+        persist().then(()=>{ render(); alert('已成功還原備份。'); });
+      }catch(err){
+        alert('讀取備份檔案失敗：'+err.message);
+      }
+    };
+    reader.readAsText(file);
   };
 }
 
