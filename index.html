@@ -183,6 +183,14 @@
   @media (max-width:800px){.grid2{grid-template-columns:1fr;}}
   .audit{font-size:11px;color:var(--ink-soft);}
   select.status-select{font-size:11.5px;}
+@media print{
+  header.top, nav.tabs, .no-print, .save-hint { display:none !important; }
+  body{ background:#fff; }
+  .app{ max-width:100%; padding:0; }
+  .panel{ break-inside:avoid; border:1px solid #999; }
+  table.plain{ break-inside:auto; }
+  table.plain tr{ break-inside:avoid; }
+}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -205,9 +213,27 @@
   try {
     const db = getFirestore(initializeApp(firebaseConfig));
     const ref = doc(db, "wsps", "data");
-    window.firebaseGetData = async () => { const snap = await getDoc(ref); return snap.exists() ? snap.data().value : null; };
-    window.firebaseSetData = async (value) => { await setDoc(ref, { value, updatedAt: Date.now() }); };
-    window.firebaseListen = (callback) => onSnapshot(ref, snap => { if (snap.exists()) callback(snap.data().value); });
+    window.firebaseGetData = async () => {
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return null;
+      const d = snap.data();
+      return { value: d.value, updatedAt: d.updatedAt };
+    };
+    window.firebaseSetData = async (value, expectedVersion) => {
+      const snap = await getDoc(ref);
+      const current = snap.exists() ? snap.data().updatedAt : null;
+      if (expectedVersion != null && current != null && current !== expectedVersion) {
+        const err = new Error('版本衝突：資料已被其他人更新');
+        err.isVersionConflict = true;
+        throw err;
+      }
+      const newVersion = Date.now();
+      await setDoc(ref, { value, updatedAt: newVersion });
+      return newVersion;
+    };
+    window.firebaseListen = (callback) => onSnapshot(ref, snap => {
+      if (snap.exists()) { const d = snap.data(); callback(d.value, d.updatedAt); }
+    });
     window.firebaseError = null;
   } catch (error) { window.firebaseError = error; }
   window.dispatchEvent(new Event('firebase-ready'));
@@ -295,7 +321,7 @@ function validateNameNoInnerSpace(name){
   return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
 }
 
-let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null };
+let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -312,16 +338,19 @@ function withTimeout(promise, ms, label){
     new Promise((_, reject) => setTimeout(()=>reject(new Error((label||'操作')+'逾時（超過 '+(ms/1000)+' 秒無回應），請檢查 Firestore 是否為 Native mode、網路是否被封鎖。')), ms))
   ]);
 }
+let REMOTE_VERSION = null; // 最後一次已知的雲端版本戳記，用於偵測「舊分頁／其他人已搶先儲存」的衝突
 async function storageGet(){
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
   requireSharedStorage();
-  const value = await withTimeout(window.firebaseGetData(), 6000, '讀取雲端資料');
-  return value ? {value} : null;
+  const r = await withTimeout(window.firebaseGetData(), 6000, '讀取雲端資料');
+  if(r) REMOTE_VERSION = r.updatedAt;
+  return r ? {value: r.value} : null;
 }
 async function storageSet(valueStr){
   if(HAS_CLOUD_STORAGE) return await window.storage.set(STORAGE_KEY, valueStr, true);
   requireSharedStorage();
-  await withTimeout(window.firebaseSetData(valueStr), 6000, '寫入雲端資料');
+  const newVersion = await withTimeout(window.firebaseSetData(valueStr, REMOTE_VERSION), 6000, '寫入雲端資料');
+  REMOTE_VERSION = newVersion;
   return {value: valueStr};
 }
 
@@ -344,9 +373,10 @@ async function loadState(){
   await persist();
   LOADED = true;
   if(USING_FIREBASE && window.firebaseListen){
-    window.firebaseListen((valueStr)=>{
+    window.firebaseListen((valueStr, updatedAt)=>{
       if(SAVING) return;
       try{
+        REMOTE_VERSION = updatedAt;
         const parsed = JSON.parse(valueStr);
         STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
         render();
@@ -411,6 +441,13 @@ async function persist(){
     await storageSet(JSON.stringify(STATE));
     succeeded = true;
   }catch(e){
+    if(e && e.isVersionConflict){
+      SAVING = false;
+      alert('資料已被其他人（或其他分頁）更新，為避免覆蓋，本次儲存已取消。將重新載入最新資料。');
+      await loadState();
+      render();
+      return;
+    }
     CLOUD_ERROR = e;
     console.error('儲存失敗', e);
   }finally{
@@ -1003,6 +1040,7 @@ const TABS = [
   {id:'audit', label:'修改記錄', privileged:true},
   {id:'calendar', label:'產能日曆與上限設定', privileged:true},
   {id:'brands', label:'客戶／品牌管理', privileged:true},
+  {id:'summary', label:'月度摘要（可列印）', privileged:true},
   {id:'export', label:'匯出', privileged:true},
 ];
 
@@ -1022,6 +1060,7 @@ function renderShell(){
     case 'audit': body = !isPrivileged() ? renderNoAccess() : renderAudit(); break;
     case 'calendar': body = !isPrivileged() ? renderNoAccess() : renderCalendar(); break;
     case 'brands': body = !isPrivileged() ? renderNoAccess() : renderBrands(); break;
+    case 'summary': body = !isPrivileged() ? renderNoAccess() : renderSummary(); break;
     case 'export': body = !isPrivileged() ? renderNoAccess() : renderExport(); break;
     default: body = renderOverview();
   }
@@ -1079,7 +1118,7 @@ function bindShell(){
     render();
   };
 
-  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
+  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindSummary(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
 
 /* ============================= 總覽 ============================= */
@@ -1605,6 +1644,77 @@ function renderAudit(){
   `;
 }
 function bindAudit(){}
+
+/* ============================= 月度摘要（可列印）============================= */
+function renderSummary(){
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份。</div>`;
+  if(!VIEW.summaryMonthId || !months.find(m=>m.id===VIEW.summaryMonthId)) VIEW.summaryMonthId = months[0].id;
+  const month = months.find(m=>m.id===VIEW.summaryMonthId);
+  const st = monthStatus(month);
+  const compTot = monthCompletionTotals(month);
+  const overallRate = st.tot.pieces>0 ? (compTot.pieces/st.tot.pieces*100) : null;
+
+  const brands = STATE.brands.filter(b=>b.active);
+  const weeksOfMonth = STATE.weeks.filter(w=>w.monthId===month.id);
+  const brandRows = brands.map(brand=>{
+    let fs=0, fp=0, cs=0, cp=0;
+    weeksOfMonth.forEach(w=>{
+      STATE.forecasts.filter(x=>x.brandId===brand.id && x.weekId===w.id && x.status!=='cancelled').forEach(x=>{fs+=x.styles||0; fp+=x.pieces||0;});
+      STATE.completions.filter(x=>x.brandId===brand.id && x.weekId===w.id && x.status!=='cancelled').forEach(x=>{cs+=x.styles||0; cp+=x.pieces||0;});
+    });
+    if(fs===0 && fp===0 && cs===0 && cp===0) return null;
+    const rate = fp>0 ? (cp/fp*100) : null;
+    return {name:brand.name, fs, fp, cs, cp, rate};
+  }).filter(Boolean).sort((a,b)=>b.fp-a.fp);
+
+  const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-summonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
+  const rowsHtml = brandRows.map(r=>`
+    <tr>
+      <td>${r.name}</td>
+      <td class="num">${r.fs.toLocaleString()}</td>
+      <td class="num">${r.fp.toLocaleString()}</td>
+      <td class="num">${r.cs.toLocaleString()}</td>
+      <td class="num">${r.cp.toLocaleString()}</td>
+      <td class="num">${r.rate==null?'—':r.rate.toFixed(0)+'%'}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="no-print">
+      <h1 class="page-title">月度摘要（可列印）</h1>
+      <p class="page-sub">產生單一乾淨版面，適合會議展示或直接列印／存 PDF。</p>
+      <div class="pill-row">${pillHtml}</div>
+      <button class="btn" id="printSummaryBtn" style="margin-bottom:16px;">列印／存為 PDF</button>
+    </div>
+    <div class="panel">
+      <h1 class="page-title" style="margin-bottom:2px;">WSPS 月度摘要 — ${monthLabel(month.ym)}</h1>
+      <p class="footnote" style="margin-bottom:18px;">產生時間：${nowStr()}</p>
+      <div class="grid2" style="margin-bottom:20px;">
+        <div>
+          <div class="metric-row"><span>預測總計</span><span class="v num">${st.tot.styles.toLocaleString()} 款／${st.tot.pieces.toLocaleString()} 件</span></div>
+          <div class="metric-row"><span>完成總計</span><span class="v num">${compTot.styles.toLocaleString()} 款／${compTot.pieces.toLocaleString()} 件</span></div>
+          <div class="metric-row"><span>整體完成率</span><span class="v num">${overallRate==null?'—':overallRate.toFixed(1)+'%'}</span></div>
+        </div>
+        <div>
+          <div class="metric-row"><span>月件數上限</span><span class="v num">${st.caps.pieceCap.toLocaleString()} 件</span></div>
+          <div class="metric-row"><span>月款數上限（週合計）</span><span class="v num">${st.caps.styleCap.toLocaleString()} 款</span></div>
+          <div class="metric-row"><span>高風險週數</span><span class="v num">${st.caps.weeks.filter(w=>{const ws=weekStatus(w); return ws.level==='at'||ws.level==='over';}).length} / ${st.caps.weeks.length}</span></div>
+        </div>
+      </div>
+      <table class="plain">
+        <thead><tr><th>客戶／品牌</th><th>預測款</th><th>預測件</th><th>完成款</th><th>完成件</th><th>完成率</th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="6" class="empty">本月尚無資料</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+}
+function bindSummary(){
+  document.querySelectorAll('[data-summonthpill]').forEach(p=>{
+    p.onclick = ()=>{ VIEW.summaryMonthId = p.dataset.summonthpill; render(); };
+  });
+  const printBtn = document.getElementById('printSummaryBtn');
+  if(printBtn) printBtn.onclick = ()=>window.print();
+}
 
 /* ============================= 產能日曆與上限設定 ============================= */
 function renderCalendar(){
