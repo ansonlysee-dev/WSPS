@@ -321,7 +321,7 @@ function validateNameNoInnerSpace(name){
   return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
 }
 
-let VIEW = { tab: 'overview', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null };
+let VIEW = { tab: 'matrix', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -1030,8 +1030,8 @@ function bindLogin(){
 }
 
 const TABS = [
-  {id:'overview', label:'未來產能總覽', privileged:false},
   {id:'matrix', label:'月度預測輸入', privileged:false},
+  {id:'overview', label:'未來產能總覽', privileged:false},
   {id:'weekly', label:'週度明細', privileged:true},
   {id:'mine', label:'我的預測', privileged:false},
   {id:'completion', label:'實質完成數輸入', privileged:true},
@@ -1114,7 +1114,7 @@ function bindShell(){
   if(curGroup) curGroup.onchange = ()=>{
     if(curGroup.value==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); render(); return; }
     SESSION.group = curGroup.value;
-    if(TABS.find(t=>t.id===VIEW.tab).privileged && !isPrivileged()) VIEW.tab='overview';
+    if(TABS.find(t=>t.id===VIEW.tab).privileged && !isPrivileged()) VIEW.tab='matrix';
     render();
   };
 
