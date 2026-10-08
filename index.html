@@ -246,12 +246,6 @@ const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
 
-const GROUP_LABELS = {
-  WRD: 'WRD',
-  BO: 'BO',
-  PPC: 'PPC',
-  SYSADMIN: '系統管理員'
-};
 const SYSTEM_ADMIN_NAME = 'ansontse'; // 「系統管理員」此選項僅此人可選擇（比對時忽略大小寫）
 
 const SEED_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","AEO Men","Adidas","Levis China","UQ","ANF","Target","CAL-PD","PPC"];
@@ -301,14 +295,20 @@ let SAVING = false;
 
 let SESSION = {
   userName: '',
-  group: 'BO'  // 'WRD' | 'BO' | 'PPC' | 'SYSADMIN'（系統管理員僅 Anson Tse 可選）
+  group: ''  // 'WRD' | 'SYSADMIN'（僅 ansontse）| 或某個客戶／品牌的 id（該品牌登入身份，只能編輯自己品牌的資料）
 };
 
 function isPrivileged(){ // WRD 或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
   return SESSION.group === 'WRD' || SESSION.group === 'SYSADMIN';
 }
+function canEditBrand(brandId){ // 品牌登入身份只能編輯自己品牌的資料；WRD／系統管理員可編輯任何品牌
+  return isPrivileged() || SESSION.group === brandId;
+}
 function identityLabel(){
-  return GROUP_LABELS[SESSION.group] || SESSION.group;
+  if(SESSION.group==='WRD') return 'WRD';
+  if(SESSION.group==='SYSADMIN') return '系統管理員';
+  const b = STATE.brands.find(x=>x.id===SESSION.group);
+  return b ? b.name : SESSION.group;
 }
 function normalizeNameForMatch(name){
   return (name||'').trim().toLowerCase().replace(/\s+/g,'');
@@ -919,6 +919,7 @@ function upsertForecast({brandId, weekId, itemRef, styles, pieces, note}, forceS
 function cancelForecast(id){
   const f = STATE.forecasts.find(x=>x.id===id);
   if(!f) return;
+  if(!canEditBrand(f.brandId)) return; // 防禦性檢查：非本品牌、非 WRD／系統管理員不可取消
   f.history = f.history||[];
   f.history.push({at:nowStr(), by:currentUser(), from:{status:f.status}, to:{status:'cancelled'}});
   f.status='cancelled'; f.modifiedBy=currentUser(); f.modifiedAt=nowStr();
@@ -996,24 +997,27 @@ function renderLogin(){
       <div class="zh">Washing Sample Projection System</div>
       <div class="en">WSPS · ZSYD WRD 內部系統</div>
     </div>
-    <p class="muted" style="margin-bottom:18px;">請輸入姓名與部門以繼續。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
+    <p class="muted" style="margin-bottom:18px;">請輸入姓名並選擇登入身份。此為內部規劃工具，用於記錄與追溯每筆預測的提交者。</p>
     <div class="field" style="margin-bottom:6px;">
       <label>姓名</label>
       <input id="loginName" type="text" placeholder="例如：陳小華" style="width:100%;">
     </div>
     <p class="footnote" style="margin:0 0 14px;">姓名中間不可有空格（例如「Anson Tse」可以，「An son Tse」不可以）。</p>
     <div class="field" style="margin-bottom:20px;">
-      <label>部門</label>
+      <label>登入身份</label>
       <select id="loginGroup" style="width:100%;">
         <option value="WRD">WRD</option>
-        <option value="BO">BO</option>
-        <option value="PPC">PPC</option>
         <option value="SYSADMIN">系統管理員（僅 ${SYSTEM_ADMIN_NAME} 可選擇）</option>
+        ${loginIdentityBrandOptions()}
       </select>
     </div>
     <button class="btn" id="loginBtn" style="width:100%;">進入系統</button>
-    <p class="footnote" style="margin-top:14px;">BO／PPC 僅可見自己逐筆資料並只能修改自己輸入的資料；WRD 與系統管理員可見全部明細、可修改他人資料及管理系統設定。</p>
+    <p class="footnote" style="margin-top:14px;">以品牌身份登入只能新增／修改該品牌自己的資料，其他品牌的資料唯讀可見；WRD 與系統管理員可見全部明細、可修改任何品牌的資料及管理系統設定。</p>
   </div>`;
+}
+function loginIdentityBrandOptions(){
+  return [...STATE.brands].filter(b=>b.active).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(b=>`<option value="${b.id}">${b.name}</option>`).join('');
 }
 function bindLogin(){
   const nameInput = document.getElementById('loginName');
@@ -1076,12 +1080,11 @@ function renderShell(){
           <input id="curName" value="${SESSION.userName}" style="width:140px;">
         </div>
         <div class="field">
-          <label>部門</label>
+          <label>登入身份</label>
           <select id="curGroup">
             <option value="WRD" ${SESSION.group==='WRD'?'selected':''}>WRD</option>
-            <option value="BO" ${SESSION.group==='BO'?'selected':''}>BO</option>
-            <option value="PPC" ${SESSION.group==='PPC'?'selected':''}>PPC</option>
             <option value="SYSADMIN" ${SESSION.group==='SYSADMIN'?'selected':''}>系統管理員（僅 ${SYSTEM_ADMIN_NAME}）</option>
+            ${loginIdentityBrandOptionsSelected()}
           </select>
         </div>
       </div>
@@ -1093,9 +1096,13 @@ function renderShell(){
     ${PENDING_CONFIRM ? renderConfirmModal() : ''}
   `;
 }
+function loginIdentityBrandOptionsSelected(){
+  return [...STATE.brands].filter(b=>b.active).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(b=>`<option value="${b.id}" ${SESSION.group===b.id?'selected':''}>${b.name}</option>`).join('');
+}
 
 function renderNoAccess(){
-  return `<div class="role-gate">此頁僅限 WRD 與系統管理員查看。<br>如需檢視全部逐筆資料，請切換部門或聯絡 WRD 規劃人員。</div>`;
+  return `<div class="role-gate">此頁僅限 WRD 與系統管理員查看。<br>如需檢視全部逐筆資料，請切換登入身份或聯絡 WRD 規劃人員。</div>`;
 }
 
 function bindShell(){
@@ -1187,12 +1194,13 @@ function renderMatrix(){
   }).join('');
 
   const rows = brands.map(brand=>{
+    const canEditRow = canEditBrand(brand.id);
     const cells = weeks.map(w=>{
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
       const stylesVal = fc ? fc.styles : '';
       const piecesVal = fc ? fc.pieces : '';
-      const lockedForMe = fc && fc.createdBy !== currentUser() && !isPrivileged();
-      const ro = lockedForMe ? 'readonly title="此資料由其他人輸入，僅 WRD／系統管理員可修改"' : '';
+      const lockedForMe = !canEditRow;
+      const ro = lockedForMe ? 'readonly title="此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改"' : '';
       return `<td>
         <div class="cellwrap${lockedForMe?' blank':''}">
           <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}" ${ro}></div>
@@ -1252,8 +1260,8 @@ function handleMatrixInputChange(inp){
 
   const existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===weekId && f.status!=='cancelled' && !f.itemRef);
 
-  if(existing && existing.createdBy !== currentUser() && !isPrivileged()){
-    alert('此資料由「'+existing.createdBy+'」輸入，只有 WRD 或系統管理員可以修改他人資料。');
+  if(!canEditBrand(brandId)){
+    alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。');
     render();
     return;
   }
@@ -1374,8 +1382,10 @@ function bindWeekly(){
 
 /* ============================= 我的預測 ============================= */
 function renderMine(){
-  const mine = STATE.forecasts.filter(f=>f.createdBy===currentUser() || f.modifiedBy===currentUser())
-    .sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
+  const mine = (isPrivileged()
+      ? STATE.forecasts.filter(f=>f.createdBy===currentUser() || f.modifiedBy===currentUser())
+      : STATE.forecasts.filter(f=>f.brandId===SESSION.group)
+    ).sort((a,b)=>b.modifiedAt.localeCompare(a.modifiedAt));
   const rows = mine.map(f=>{
     const week = STATE.weeks.find(w=>w.id===f.weekId);
     const month = week ? STATE.months.find(m=>m.id===week.monthId) : null;
