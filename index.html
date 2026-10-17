@@ -114,12 +114,13 @@
     border-right:2px solid var(--line);white-space:nowrap;
   }
   table.matrix tbody tr:nth-child(even) td.brandcol{background:#FAF9F5;}
-  .cellwrap{padding:6px 8px;display:flex;flex-direction:column;gap:3px;min-width:104px;}
+  .cellwrap{padding:6px 8px;display:flex;flex-direction:column;gap:3px;min-width:118px;}
   .cellwrap .pair{display:flex;gap:4px;align-items:center;}
   .cellwrap input{
-    width:46px;font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px solid var(--line);
-    border-radius:2px;padding:3px 4px;text-align:right;
+    width:68px;font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px solid var(--line);
+    border-radius:2px;padding:3px 6px;text-align:right;-moz-appearance:textfield;appearance:textfield;
   }
+  .cellwrap input::-webkit-outer-spin-button,.cellwrap input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
   .cellwrap input:focus{outline:2px solid var(--accent);outline-offset:0;border-color:var(--accent);}
   .cellwrap .tag{font-size:9.5px;color:var(--ink-soft);width:14px;}
   .cellwrap.blank{color:#BEB9AC;}
@@ -231,6 +232,16 @@
       await setDoc(ref, { value, updatedAt: newVersion });
       return newVersion;
     };
+    window.firebaseSaveBackupOnce = async (key, value) => {
+      const bref = doc(db, "wsps", "backup-" + key);
+      const snap = await getDoc(bref);
+      if (!snap.exists()) { await setDoc(bref, { value, savedAt: Date.now() }); return true; }
+      return false;
+    };
+    window.firebaseGetBackup = async (key) => {
+      const snap = await getDoc(doc(db, "wsps", "backup-" + key));
+      return snap.exists() ? snap.data().value : null;
+    };
     window.firebaseListen = (callback) => onSnapshot(ref, snap => {
       if (snap.exists()) { const d = snap.data(); callback(d.value, d.updatedAt); }
     });
@@ -240,6 +251,7 @@
 </script>
 <script>
 /* ============================= 常數與預設值 ============================= */
+const MAX_WORKDAYS_PER_WEEK = 6; // 廠房每週最多 6 個工作日（週上限以此計，不以 7 日計）
 const STYLE_PER_DAY = 85;
 const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
@@ -342,7 +354,7 @@ let REMOTE_VERSION = null; // 最後一次已知的雲端版本戳記，用於�
 async function storageGet(){
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
   requireSharedStorage();
-  const r = await withTimeout(window.firebaseGetData(), 6000, '讀取雲端資料');
+  const r = await withTimeout(window.firebaseGetData(), 15000, '讀取雲端資料');
   if(r) REMOTE_VERSION = r.updatedAt;
   return r ? {value: r.value} : null;
 }
@@ -354,22 +366,38 @@ async function storageSet(valueStr){
   return {value: valueStr};
 }
 
+let LOAD_FAILED = false; // 讀取雲端資料失敗時為 true：此時絕不可用預設資料覆蓋雲端
+function todayKey(){ const d=new Date(); return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
 async function loadState(){
+  LOAD_FAILED = false;
+  let loadedFromCloud = false, rawValue = null;
   try{
     const r = await storageGet();
     if(r && r.value){
       const parsed = JSON.parse(r.value);
       STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+      loadedFromCloud = true; rawValue = r.value;
     } else {
-      seedInitialData();
+      seedInitialData(); // 只有在「雲端確實沒有資料文件」時才建立預設資料
     }
   }catch(e){
-    seedInitialData();
+    // 讀取失敗（無權限、逾時、網絡問題、資料損毀）：停止，不使用預設資料，更不可寫回雲端
+    LOAD_FAILED = true;
+    CLOUD_ERROR = e;
+    console.error('讀取雲端資料失敗，已停止以避免覆蓋', e);
+    LOADED = true;
+    return;
+  }
+  // 每日一次自動備份（取當日第一次載入時的雲端資料，之後當日的修改不會覆蓋此備份）
+  if(loadedFromCloud && USING_FIREBASE && window.firebaseSaveBackupOnce){
+    window.firebaseSaveBackupOnce(todayKey(), rawValue).catch(e=>console.warn('自動備份失敗', e));
   }
   runHardResetSept2026Migration();
   runHistoricalImportMigration();
   runHistoricalImportV2Migration();
+  runBrandRepairMigration();
   runSepWeeklyImportMigration();
+  runWorkdaysCapMigration();
   await persist();
   LOADED = true;
   if(USING_FIREBASE && window.firebaseListen){
@@ -424,7 +452,7 @@ function runHardResetSept2026Migration(){
   WEEK_LIST.forEach(([start,end,ownerYm])=>{
     STATE.weeks.push({
       id: uid('week'), monthId: monthIdByYm[ownerYm], startDate:start, endDate:end,
-      workdays:7, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
+      workdays:MAX_WORKDAYS_PER_WEEK, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
       overrideReason:'', overrideBy:'', overrideAt:''
     });
   });
@@ -434,6 +462,7 @@ function runHardResetSept2026Migration(){
 }
 
 async function persist(){
+  if(LOAD_FAILED){ alert('目前無法讀取雲端資料，為避免覆蓋已停止所有儲存。請重新整理頁面後再試。'); return; }
   let succeeded = false;
   try{
     SAVING = true;
@@ -496,7 +525,7 @@ function seedInitialData(){
     if(clipStart <= clipEnd){
       // 規劃歸屬月份：以業務週開始日所在月份為預設（管理員可於產能日曆頁面調整）
       const owner = ownerMonthByMajority(clipStart, clipEnd, months) || months[0];
-      const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
+      const days = Math.min(MAX_WORKDAYS_PER_WEEK, Math.round((clipEnd - clipStart) / 86400000) + 1);
       STATE.weeks.push({
         id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
         workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
@@ -711,9 +740,9 @@ function runHistoricalImportV2Migration(){
    此遷移以 _sepWeeklyImportV1 旗標保護，只會套用一次。 */
 const SEP_WEEKLY_DATA = {
   weeks: [
-    {start:'2026-08-29', end:'2026-09-04', workdays:7},
-    {start:'2026-09-05', end:'2026-09-11', workdays:7},
-    {start:'2026-09-12', end:'2026-09-18', workdays:7},
+    {start:'2026-08-29', end:'2026-09-04', workdays:6},
+    {start:'2026-09-05', end:'2026-09-11', workdays:6},
+    {start:'2026-09-12', end:'2026-09-18', workdays:6},
     {start:'2026-09-19', end:'2026-09-24', workdays:6},
     {start:'2026-09-25', end:'2026-09-30', workdays:6},
   ],
@@ -744,6 +773,89 @@ const SEP_WEEKLY_DATA = {
     'PPC-Jonie组客户': [[2,24,2,24],[3,30,2,28],[2,24,0,0],[2,24,0,0],[3,30,0,0]],
   }
 };
+/* ============================= 客戶清單修復（v1）=============================
+   問題：舊的「歷史匯入 v1」在硬重設後被旗標跳過，導致客戶清單從未補上 Excel 的完整客戶與分組
+   （CAL-PD 兩個組別、PPC 的 Paul／Jonie 組別、Zara、GAP、Banana Republic、Bestseller 等），
+   9 月逐週匯入時這些客戶因找不到而被靜默略過。此遷移會：
+   (1) 補齊缺少的客戶；(2) 停用沒有任何資料的舊版籠統「CAL-PD」「PPC」（若已有人輸入資料則保留）；
+   (3) 只為「9 月完全沒有任何紀錄」的客戶補入 Excel 的 9 月逐週預計數／完成數，不影響已有資料。 */
+function runBrandRepairMigration(){
+  if(STATE._brandRepairV1) return;
+
+  HISTORICAL_BRANDS.forEach(name=>{
+    if(!STATE.brands.find(x=>x.name===name)){
+      STATE.brands.push({id:uid('brand'), name, active: !HISTORICAL_INACTIVE_BRANDS.includes(name)});
+    }
+  });
+  const hasAnyData = id => STATE.forecasts.some(f=>f.brandId===id && f.status!=='cancelled')
+                        || STATE.completions.some(c=>c.brandId===id && c.status!=='cancelled');
+  ['CAL-PD','PPC'].forEach(name=>{
+    const b = STATE.brands.find(x=>x.name===name);
+    if(b && !hasAnyData(b.id)) b.active = false;
+  });
+
+  const ts = nowStr();
+  const pushEntries = (brand, week, fs, fp, cs, cp, note)=>{
+    STATE.forecasts.push({
+      id: uid('fc'), brandId: brand.id, weekId: week.id, itemRef:'', styles:fs, pieces:fp,
+      note: note+'（預計數）', status:'active', createdBy:'系統匯入', createdAt:ts, modifiedBy:'系統匯入', modifiedAt:ts,
+      history:[{at:ts, by:'系統匯入', from:null, to:{styles:fs, pieces:fp}}]
+    });
+    STATE.completions.push({
+      id: uid('cm'), brandId: brand.id, weekId: week.id, itemRef:'', styles:cs, pieces:cp,
+      note: note+'（完成數）', status:'active', createdBy:'系統匯入', createdAt:ts, modifiedBy:'系統匯入', modifiedAt:ts,
+      history:[{at:ts, by:'系統匯入', from:null, to:{styles:cs, pieces:cp}}]
+    });
+  };
+  const brandHasEntriesIn = (brandId, weekIds)=> STATE.forecasts.some(f=>f.brandId===brandId && weekIds.has(f.weekId) && f.status!=='cancelled')
+                                              || STATE.completions.some(c=>c.brandId===brandId && weekIds.has(c.weekId) && c.status!=='cancelled');
+
+  // 9 月補入（僅在 9 月週別結構與 Excel 一致、且 9 月已有資料時）
+  const sepMonth = STATE.months.find(m=>m.ym==='2026-09');
+  if(sepMonth){
+    const sepWeeks = STATE.weeks.filter(w=>w.monthId===sepMonth.id);
+    const byStart = {}; sepWeeks.forEach(w=>{ byStart[w.startDate]=w; });
+    const sepIds = new Set(sepWeeks.map(w=>w.id));
+    const structureOk = SEP_WEEKLY_DATA.weeks.every(w=>byStart[w.start]);
+    const anyData = sepWeeks.some(w=>STATE.forecasts.some(f=>f.weekId===w.id && f.status!=='cancelled'));
+    if(structureOk && anyData){
+      Object.keys(SEP_WEEKLY_DATA.brands).forEach(bn=>{
+        const brand = STATE.brands.find(x=>x.name===bn);
+        if(!brand || brandHasEntriesIn(brand.id, sepIds)) return;
+        SEP_WEEKLY_DATA.brands[bn].forEach((vals, idx)=>{
+          const week = byStart[SEP_WEEKLY_DATA.weeks[idx].start];
+          pushEntries(brand, week, vals[0], vals[1], vals[2], vals[3], '9月逐週補入（來源 Excel）');
+        });
+      });
+    }
+  }
+  // 8 月補入（僅在 8 月匯入週已有資料時，補上當時找不到的客戶）
+  const augMonth = STATE.months.find(m=>m.ym==='2026-08');
+  const augWeek = augMonth ? STATE.weeks.find(w=>w.monthId===augMonth.id && w._isMonthlyImportWeek) : null;
+  if(augWeek && STATE.forecasts.some(f=>f.weekId===augWeek.id && f.status!=='cancelled')){
+    const augIds = new Set([augWeek.id]);
+    const aug = HISTORICAL_V2_MONTHLY['2026-08'];
+    Object.keys(aug.forecast).forEach(bn=>{
+      const brand = STATE.brands.find(x=>x.name===bn);
+      if(!brand || brandHasEntriesIn(brand.id, augIds)) return;
+      const [fs,fp] = aug.forecast[bn], [cs,cp] = aug.completion[bn];
+      pushEntries(brand, augWeek, fs, fp, cs, cp, '8月歷史月度合計補入（來源 Excel）');
+    });
+  }
+
+  STATE._brandRepairV1 = true;
+}
+
+/* 每週最多 6 個工作日（業主決定）：把已存在、工作日數大於 6 的業務週改為 6（Aug 全月匯入用週別不受影響；
+   已被管理員手動調低的週別保持不變）。以 _workdaysCap6V1 旗標保護，只套用一次。 */
+function runWorkdaysCapMigration(){
+  if(STATE._workdaysCap6V1) return;
+  STATE.weeks.forEach(w=>{
+    if(!w._isMonthlyImportWeek && (w.workdays||0) > MAX_WORKDAYS_PER_WEEK) w.workdays = MAX_WORKDAYS_PER_WEEK;
+  });
+  STATE._workdaysCap6V1 = true;
+}
+
 function runSepWeeklyImportMigration(){
   if(STATE._sepWeeklyImportV1) return;
 
@@ -978,6 +1090,17 @@ function render(){
   const app = document.getElementById('app');
   if(!LOADED){
     app.innerHTML = '<div class="role-gate">載入中…</div>';
+    return;
+  }
+  if(LOAD_FAILED){
+    app.innerHTML = `<div style="max-width:520px;margin:90px auto;padding:28px;border:1px solid var(--red);background:var(--panel);border-radius:var(--radius);">
+      <h2 style="color:var(--red);margin:0 0 10px;">無法讀取雲端資料</h2>
+      <p>為了保護資料，系統已暫停使用（不會用預設資料覆蓋雲端）。常見原因：Firestore 規則過期／權限不足、網絡不穩。</p>
+      <p class="footnote">錯誤訊息：${(CLOUD_ERROR && CLOUD_ERROR.message) || '未知'}</p>
+      <button class="btn" id="retryLoadBtn">重新載入</button>
+    </div>`;
+    const rb = document.getElementById('retryLoadBtn');
+    if(rb) rb.onclick = ()=>{ LOADED=false; render(); loadState().then(render); };
     return;
   }
   const errorBanner = CLOUD_ERROR ? `<div class="warn-banner over" style="max-width:420px;margin:20px auto 0;">${(CLOUD_ERROR.message||'共用資料庫連線失敗')}</div>` : '';
@@ -1841,7 +1964,7 @@ function regenerateEmptyFutureWeeks(){
       const clipEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
       if(clipStart <= clipEnd){
         const owner = ownerMonthByMajority(clipStart, clipEnd, monthMeta) || monthMeta[0];
-        const days = Math.round((clipEnd - clipStart) / 86400000) + 1;
+        const days = Math.min(MAX_WORKDAYS_PER_WEEK, Math.round((clipEnd - clipStart) / 86400000) + 1);
         STATE.weeks.push({
           id: uid('week'), monthId: owner.id, startDate: fmtDate(clipStart), endDate: fmtDate(clipEnd),
           workdays: days, styleCapOverride:null, pieceCapPlanOverride:null, pieceCapOpsOverride:null,
@@ -2043,7 +2166,24 @@ function renderExport(){
         <button class="btn danger" id="restoreBackupBtn">還原此備份</button>
       </div>
     </div>
+    <div class="panel" style="border-color:var(--red);">
+      <h2 style="color:var(--red);">從雲端自動備份還原</h2>
+      <p class="footnote">系統每日第一次載入時，會自動把當時的雲端資料存成當日備份。如資料被誤刪或覆蓋，可選擇日期還原到該日最早的狀態（會完全覆蓋目前資料，不可復原）。</p>
+      <div class="field-row">
+        <div class="field"><label>備份日期</label><select id="cloudBackupDate">${cloudBackupDateOptions()}</select></div>
+        <button class="btn danger" id="restoreCloudBackupBtn">還原此日備份</button>
+      </div>
+    </div>
   `;
+}
+function cloudBackupDateOptions(){
+  const opts=[]; const d=new Date();
+  for(let i=0;i<14;i++){
+    const k=d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+    opts.push(`<option value="${k}">${k}${i===0?'（今日）':''}</option>`);
+    d.setDate(d.getDate()-1);
+  }
+  return opts.join('');
 }
 function bindExport(){
   const monthIdFor = ()=> document.getElementById('exportMonth').value;
@@ -2096,6 +2236,21 @@ function bindExport(){
     a.href = url; a.download = 'WSPS_backup_'+fmtDate(new Date())+'.json';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const cloudRestoreBtn = document.getElementById('restoreCloudBackupBtn');
+  if(cloudRestoreBtn) cloudRestoreBtn.onclick = async ()=>{
+    const key = document.getElementById('cloudBackupDate').value;
+    if(!window.firebaseGetBackup){ alert('目前未連接雲端資料庫，無法讀取備份。'); return; }
+    let value;
+    try{ value = await window.firebaseGetBackup(key); }catch(e){ alert('讀取備份失敗：'+e.message); return; }
+    if(!value){ alert(key+' 沒有備份（系統只會在有人載入網站的當日建立備份）。'); return; }
+    if(!confirm('確定要用 '+key+' 的備份完全覆蓋目前所有資料嗎？此操作不可復原。')) return;
+    try{
+      const parsed = JSON.parse(value);
+      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+      persist().then(()=>{ render(); alert('已還原 '+key+' 的備份。'); });
+    }catch(e){ alert('備份內容損毀：'+e.message); }
   };
 
   const restoreBtn = document.getElementById('restoreBackupBtn');
