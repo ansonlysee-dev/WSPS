@@ -313,6 +313,13 @@ let SESSION = {
 function isPrivileged(){ // WRD 或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
   return SESSION.group === 'WRD' || SESSION.group === 'SYSADMIN';
 }
+function isWeekLocked(week){ // 已過去的業務週（結束日早於今日）即鎖定，避免事後改動歷史預測
+  return !!week && fmtDate(new Date()) > week.endDate;
+}
+function canEditForecastCell(brandId, week){ // 品牌身份：只能改自己品牌且未鎖定的週；WRD／系統管理員不受鎖定限制（用於更正錯誤）
+  if(!canEditBrand(brandId)) return false;
+  return isPrivileged() || !isWeekLocked(week);
+}
 function canEditBrand(brandId){ // 品牌登入身份只能編輯自己品牌的資料；WRD／系統管理員可編輯任何品牌
   return isPrivileged() || SESSION.group === brandId;
 }
@@ -1031,7 +1038,7 @@ function upsertForecast({brandId, weekId, itemRef, styles, pieces, note}, forceS
 function cancelForecast(id){
   const f = STATE.forecasts.find(x=>x.id===id);
   if(!f) return;
-  if(!canEditBrand(f.brandId)) return; // 防禦性檢查：非本品牌、非 WRD／系統管理員不可取消
+  if(!canEditForecastCell(f.brandId, STATE.weeks.find(w=>w.id===f.weekId))) return false; // 防禦性檢查：非本品牌、已鎖定週（非 WRD／系統管理員）不可取消
   f.history = f.history||[];
   f.history.push({at:nowStr(), by:currentUser(), from:{status:f.status}, to:{status:'cancelled'}});
   f.status='cancelled'; f.modifiedBy=currentUser(); f.modifiedAt=nowStr();
@@ -1313,7 +1320,8 @@ function renderMatrix(){
   const headerCells = weeks.map(w=>{
     const ws = weekStatus(w);
     const cls = ws.level==='over'?'over':ws.level==='at'?'at':ws.level==='near'?'near':'normal';
-    return `<th style="min-width:130px;">${weekLabel(w)}<br><span class="status-chip ${cls}" style="margin-top:4px;">${ws.level==='over'?'超操作參考':ws.level==='at'?'達上限':ws.level==='near'?'接近上限':'正常'}</span></th>`;
+    const lockTag = isWeekLocked(w) ? '<div style="font-size:10.5px;color:#cfcabb;margin-top:3px;">已鎖定（週已過）</div>' : '';
+    return `<th style="min-width:130px;">${weekLabel(w)}${lockTag}<br><span class="status-chip ${cls}" style="margin-top:4px;">${ws.level==='over'?'超操作參考':ws.level==='at'?'達上限':ws.level==='near'?'接近上限':'正常'}</span></th>`;
   }).join('');
 
   const rows = brands.map(brand=>{
@@ -1322,8 +1330,9 @@ function renderMatrix(){
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
       const stylesVal = fc ? fc.styles : '';
       const piecesVal = fc ? fc.pieces : '';
-      const lockedForMe = !canEditRow;
-      const ro = lockedForMe ? 'readonly title="此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改"' : '';
+      const lockedForMe = !canEditForecastCell(brand.id, w);
+      const lockMsg = !canEditRow ? '此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改' : '此業務週已過，數據已鎖定，只有 WRD 或系統管理員可以修改';
+      const ro = lockedForMe ? `readonly title="${lockMsg}"` : '';
       return `<td>
         <div class="cellwrap${lockedForMe?' blank':''}">
           <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}" ${ro}></div>
@@ -1385,6 +1394,11 @@ function handleMatrixInputChange(inp){
 
   if(!canEditBrand(brandId)){
     alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。');
+    render();
+    return;
+  }
+  if(!canEditForecastCell(brandId, STATE.weeks.find(w=>w.id===weekId))){
+    alert('此業務週已過，數據已鎖定，只有 WRD 或系統管理員可以修改。');
     render();
     return;
   }
@@ -1536,7 +1550,7 @@ function bindMine(){
   document.querySelectorAll('[data-cancelfc]').forEach(b=>{
     b.onclick = ()=>{
       if(confirm('確定要取消此筆預測嗎？取消後不會計入合計，但歷程仍會保留。')){
-        cancelForecast(b.dataset.cancelfc);
+        if(cancelForecast(b.dataset.cancelfc)===false){ alert('此筆預測所屬業務週已過（已鎖定）或不屬於你的品牌，只有 WRD 或系統管理員可以取消。'); return; }
         persist().then(render);
       }
     };
