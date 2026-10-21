@@ -383,6 +383,7 @@ async function loadState(){
     if(r && r.value){
       const parsed = JSON.parse(r.value);
       STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+      BASE_STATE = cloneState(STATE);
       loadedFromCloud = true; rawValue = r.value;
     } else {
       seedInitialData(); // 只有在「雲端確實沒有資料文件」時才建立預設資料
@@ -409,12 +410,14 @@ async function loadState(){
   LOADED = true;
   if(USING_FIREBASE && window.firebaseListen){
     window.firebaseListen((valueStr, updatedAt)=>{
-      if(SAVING) return;
+      if(updatedAt===REMOTE_VERSION) return; // 自己剛寫入的版本，或已知版本
       try{
+        const remote = Object.assign(STATE_DEFAULTS(), JSON.parse(valueStr));
         REMOTE_VERSION = updatedAt;
-        const parsed = JSON.parse(valueStr);
-        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
-        render();
+        const before = JSON.stringify(STATE);
+        STATE = mergeStates(BASE_STATE, STATE, remote);
+        BASE_STATE = cloneState(remote);
+        if(JSON.stringify(STATE)!==before) softRender();
       }catch(e){ console.error('同步資料格式錯誤', e); }
     });
   }
@@ -468,35 +471,144 @@ function runHardResetSept2026Migration(){
   STATE._historicalImportV1 = true; // 避免重設後，歷史匯入邏輯又自動補回舊的 8/9 月資料
 }
 
-async function persist(){
+/* ============================= 儲存／同步（v3）=============================
+   - 輸入後延遲約 1 秒才儲存（連續輸入合併為一次寫入），不再每離開一格就即時寫入並重畫整個表。
+   - 儲存撞版時：不再放棄，而是讀取最新雲端資料，逐筆（以 id 為單位）三方合併，再重試儲存。
+   - 收到他人更新時：同樣三方合併，只在畫面上有變化時才更新；若你正在輸入，等你離開該格後才刷新，不會洗走正在輸入的內容。 */
+let BASE_STATE = null;     // 最後一次與雲端同步成功時的資料快照（三方合併的「共同祖先」）
+let DIRTY = false, DIRTY_SEQ = 0, SAVE_TIMER = null, NEEDS_RENDER = false, MERGED_ON_CONFLICT = false;
+let PERSIST_QUEUE = Promise.resolve();
+const STATE_DEFAULTS = ()=>({brands:[],months:[],weeks:[],forecasts:[],completions:[]});
+function cloneState(o){ return JSON.parse(JSON.stringify(o)); }
+function nz(v){ return v==null ? '—' : v; } // 未填報顯示為「—」，與填 0 區分
+
+function mergeById(base, local, remote){
+  const baseMap = new Map((base||[]).map(x=>[x.id, JSON.stringify(x)]));
+  const localMap = new Map((local||[]).map(x=>[x.id, x]));
+  const out = [], seen = new Set();
+  (remote||[]).forEach(r=>{
+    seen.add(r.id);
+    const l = localMap.get(r.id), b = baseMap.get(r.id);
+    if(!l){ out.push(r); return; }                       // 本機沒有（或只有雲端有）：用雲端版本
+    const lj = JSON.stringify(l), rj = JSON.stringify(r);
+    if(b===undefined){ out.push(lj===rj ? r : l); return; }
+    const localChanged = lj!==b, remoteChanged = rj!==b;
+    if(localChanged && !remoteChanged) out.push(l);      // 只有我改過：保留我的
+    else if(!localChanged) out.push(r);                  // 我沒改：採用雲端（他人）的
+    else out.push(l);                                    // 雙方都改同一筆：以我最新的修改為準
+  });
+  (local||[]).forEach(l=>{
+    if(seen.has(l.id)) return;
+    const b = baseMap.get(l.id);
+    if(b===undefined || JSON.stringify(l)!==b) out.push(l); // 我新增或修改過、雲端沒有的
+  });
+  return out;
+}
+function mergeStates(base, local, remote){
+  const out = Object.assign({}, remote);
+  ['brands','months','weeks','forecasts','completions'].forEach(k=>{
+    out[k] = mergeById(base && base[k], local[k], remote[k]);
+  });
+  Object.keys(local).forEach(k=>{ if(k.startsWith('_') && local[k] && !out[k]) out[k]=local[k]; }); // 遷移旗標取聯集
+  return out;
+}
+
+function persist(opts){
+  PERSIST_QUEUE = PERSIST_QUEUE.then(()=>persistNow(opts||{})).catch(e=>console.error(e));
+  return PERSIST_QUEUE;
+}
+async function persistNow(opts){
   if(LOAD_FAILED){ alert('目前無法讀取雲端資料，為避免覆蓋已停止所有儲存。請重新整理頁面後再試。'); return; }
+  const seq = DIRTY_SEQ;
   let succeeded = false;
   try{
     SAVING = true;
     CLOUD_ERROR = null;
-    await storageSet(JSON.stringify(STATE));
-    succeeded = true;
-  }catch(e){
-    if(e && e.isVersionConflict){
-      SAVING = false;
-      alert('資料已被其他人（或其他分頁）更新，為避免覆蓋，本次儲存已取消。將重新載入最新資料。');
-      await loadState();
-      render();
-      return;
+    for(let attempt=0; attempt<4 && !succeeded; attempt++){
+      try{
+        await storageSet(JSON.stringify(STATE));
+        succeeded = true;
+      }catch(e){
+        if(e && e.isVersionConflict && USING_FIREBASE){
+          const r = await withTimeout(window.firebaseGetData(), 15000, '讀取雲端資料');
+          if(!r) throw e;
+          REMOTE_VERSION = r.updatedAt;
+          if(!opts.overwrite){
+            const remote = Object.assign(STATE_DEFAULTS(), JSON.parse(r.value));
+            STATE = mergeStates(BASE_STATE, STATE, remote);
+            BASE_STATE = cloneState(remote);
+            MERGED_ON_CONFLICT = true;
+          }
+          continue; // 以最新版本號重試
+        }
+        throw e;
+      }
     }
+    if(succeeded){
+      BASE_STATE = cloneState(STATE);
+      if(DIRTY_SEQ===seq) DIRTY = false;
+    } else {
+      CLOUD_ERROR = new Error('多次儲存都與他人更新衝突，請稍後再試');
+    }
+  }catch(e){
     CLOUD_ERROR = e;
     console.error('儲存失敗', e);
   }finally{
     SAVING = false;
     const hint = document.getElementById('saveHint');
     if(hint){
-      hint.textContent = succeeded ? '已同步' : '未同步：共用資料庫未連線';
+      hint.textContent = succeeded ? '已同步' : '未同步：請檢查網絡或稍後再試';
       hint.classList.add('show');
       clearTimeout(saveTimer);
       saveTimer = setTimeout(()=>hint.classList.remove('show'), 2200);
     }
   }
+  if(succeeded && MERGED_ON_CONFLICT){ MERGED_ON_CONFLICT = false; softRender(); }
 }
+// 輸入後呼叫：標記有未儲存修改，約 1 秒後寫入雲端；並在下一個畫面週期更新畫面（保留游標）
+function commitEdit(){
+  DIRTY = true; DIRTY_SEQ++;
+  const hint = document.getElementById('saveHint');
+  if(hint){ hint.textContent = '儲存中…'; hint.classList.add('show'); }
+  clearTimeout(SAVE_TIMER);
+  SAVE_TIMER = setTimeout(()=>{ persist(); }, 1000);
+  setTimeout(renderKeepFocus, 0);
+}
+function renderKeepFocus(){
+  const ae = document.activeElement;
+  let info = null;
+  if(ae && ae.tagName==='INPUT' && ae.closest && ae.closest('#app')){
+    info = {ds:Object.assign({}, ae.dataset), value:ae.value};
+  }
+  render();
+  if(info){
+    const sel = Object.keys(info.ds).map(k=>`[data-${k.replace(/[A-Z]/g, m=>'-'+m.toLowerCase())}="${info.ds[k]}"]`).join('');
+    const el = sel ? document.querySelector('#app input'+sel) : null;
+    if(el){
+      if(el.value!==info.value) el.value = info.value;
+      el.focus();
+      try{ el.select(); }catch(e){}
+    }
+  }
+}
+// 遠端更新／合併後使用：若使用者正在輸入框內打字，先不重畫，等離開輸入框後才刷新
+function softRender(){
+  const ae = document.activeElement;
+  if(ae && ae.tagName==='INPUT' && ae.closest && ae.closest('#app')){ NEEDS_RENDER = true; return; }
+  NEEDS_RENDER = false;
+  render();
+}
+document.addEventListener('focusout', ()=>{
+  setTimeout(()=>{
+    if(!NEEDS_RENDER) return;
+    const ae = document.activeElement;
+    if(ae && ae.tagName==='INPUT' && ae.closest && ae.closest('#app')) return;
+    NEEDS_RENDER = false; render();
+  }, 0);
+});
+window.addEventListener('beforeunload', (e)=>{
+  if(DIRTY){ e.preventDefault(); e.returnValue = ''; }
+});
 let saveTimer=null;
 function flashSaved(){
   const el = document.getElementById('saveHint');
@@ -1165,10 +1277,10 @@ function bindLogin(){
 
 const TABS = [
   {id:'matrix', label:'月度預測輸入', privileged:false},
+  {id:'completion', label:'實質完成數輸入', privileged:false},
   {id:'overview', label:'未來產能總覽', privileged:false},
   {id:'weekly', label:'週度明細', privileged:true},
   {id:'mine', label:'我的預測', privileged:false},
-  {id:'completion', label:'實質完成數輸入', privileged:true},
   {id:'comparison', label:'完成數對比預測數', privileged:true},
   {id:'trend', label:'完成率趨勢', privileged:true},
   {id:'audit', label:'修改記錄', privileged:true},
@@ -1188,7 +1300,7 @@ function renderShell(){
     case 'matrix': body = renderMatrix(); break;
     case 'weekly': body = !isPrivileged() ? renderNoAccess() : renderWeekly(); break;
     case 'mine': body = renderMine(); break;
-    case 'completion': body = !isPrivileged() ? renderNoAccess() : renderCompletion(); break;
+    case 'completion': body = renderCompletion(); break;
     case 'comparison': body = !isPrivileged() ? renderNoAccess() : renderComparison(); break;
     case 'trend': body = !isPrivileged() ? renderNoAccess() : renderTrend(); break;
     case 'audit': body = !isPrivileged() ? renderNoAccess() : renderAudit(); break;
@@ -1328,8 +1440,8 @@ function renderMatrix(){
     const canEditRow = canEditBrand(brand.id);
     const cells = weeks.map(w=>{
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
-      const stylesVal = fc ? fc.styles : '';
-      const piecesVal = fc ? fc.pieces : '';
+      const stylesVal = fc && fc.styles!=null ? fc.styles : '';
+      const piecesVal = fc && fc.pieces!=null ? fc.pieces : '';
       const lockedForMe = !canEditForecastCell(brand.id, w);
       const lockMsg = !canEditRow ? '此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改' : '此業務週已過，數據已鎖定，只有 WRD 或系統管理員可以修改';
       const ro = lockedForMe ? `readonly title="${lockMsg}"` : '';
@@ -1403,15 +1515,12 @@ function handleMatrixInputChange(inp){
     return;
   }
 
-  let styles = existing ? existing.styles : 0;
-  let pieces = existing ? existing.pieces : 0;
-  if(field==='styles') styles = val==null? 0 : val;
-  if(field==='pieces') pieces = val==null? 0 : val;
-
-  // if both fields now empty/zero-null and no existing record and user cleared -> do nothing (blank = 未填報)
-  const bothBlank = (field==='styles' ? val==null : (existing? existing.styles===0 && !existing._touchedStyles : true)) &&
-                     (field==='pieces' ? val==null : (existing? existing.pieces===0 && !existing._touchedPieces : true));
-  if(!existing && val==null){ render(); return; }
+  // 未填（null）與填 0 分開：只更新被編輯的那一格，另一格保持原狀（未填就維持空白，不會自動變成 0）
+  let styles = existing ? existing.styles : null;
+  let pieces = existing ? existing.pieces : null;
+  if(field==='styles') styles = val;
+  if(field==='pieces') pieces = val;
+  if(!existing && val==null){ return; } // 沒有紀錄又沒輸入內容：不需處理
 
   const week = STATE.weeks.find(w=>w.id===weekId);
   const caps = weekCaps(week);
@@ -1419,8 +1528,8 @@ function handleMatrixInputChange(inp){
   // remove existing contribution before adding projected
   const prevContribStyles = existing? existing.styles||0 : 0;
   const prevContribPieces = existing? existing.pieces||0 : 0;
-  const newStyleTotal = projectedTotals.styles - prevContribStyles + styles;
-  const newPieceTotal = projectedTotals.pieces - prevContribPieces + pieces;
+  const newStyleTotal = projectedTotals.styles - prevContribStyles + (styles||0);
+  const newPieceTotal = projectedTotals.pieces - prevContribPieces + (pieces||0);
 
   const overStyleCap = newStyleTotal >= caps.styleCap && caps.styleCap>0;
   const overOpsCap = newPieceTotal >= caps.pieceCapOps && caps.pieceCapOps>0;
@@ -1428,7 +1537,7 @@ function handleMatrixInputChange(inp){
 
   const doSave = (forceStatus)=>{
     upsertForecast({brandId, weekId, itemRef:'', styles, pieces, note:''}, forceStatus);
-    persist().then(render);
+    commitEdit();
   };
 
   if(overOpsCap || overStyleCap){
@@ -1484,8 +1593,8 @@ function renderWeekly(){
   const rows = fs.map(f=>`
     <tr>
       <td>${brandName(f.brandId)}${f.itemRef?'<div class="muted footnote">項目：'+f.itemRef+'</div>':''}</td>
-      <td class="num">${f.styles}</td>
-      <td class="num">${f.pieces}</td>
+      <td class="num">${nz(f.styles)}</td>
+      <td class="num">${nz(f.pieces)}</td>
       <td>${f.note||'<span class="muted">—</span>'}</td>
       <td><span class="badge">${statusLabel(f.status)}</span></td>
       <td class="audit">${f.createdBy}<br>${f.createdAt}</td>
@@ -1530,8 +1639,8 @@ function renderMine(){
     <tr>
       <td>${brandName(f.brandId)}</td>
       <td>${month?monthLabel(month.ym):''}<br class="muted">${week?weekLabel(week):''}</td>
-      <td class="num">${f.styles}</td>
-      <td class="num">${f.pieces}</td>
+      <td class="num">${nz(f.styles)}</td>
+      <td class="num">${nz(f.pieces)}</td>
       <td><span class="badge">${statusLabel(f.status)}</span></td>
       <td class="audit">${f.modifiedAt}</td>
       <td>${f.status!=='cancelled' ? `<button class="btn secondary btn-sm" data-cancelfc="${f.id}">取消</button>` : '<span class="muted">—</span>'}</td>
@@ -1570,14 +1679,16 @@ function renderCompletion(){
   const headerCells = weeks.map(w=>`<th style="min-width:130px;">${weekLabel(w)}</th>`).join('');
 
   const rows = brands.map(brand=>{
+    const canEditRow = canEditBrand(brand.id);
     const cells = weeks.map(w=>{
       const cm = STATE.completions.find(c=>c.brandId===brand.id && c.weekId===w.id && c.status!=='cancelled' && !c.itemRef);
-      const stylesVal = cm ? cm.styles : '';
-      const piecesVal = cm ? cm.pieces : '';
+      const stylesVal = cm && cm.styles!=null ? cm.styles : '';
+      const piecesVal = cm && cm.pieces!=null ? cm.pieces : '';
+      const cRo = canEditRow ? '' : 'readonly title="此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改"';
       return `<td>
-        <div class="cellwrap">
-          <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="styles" value="${stylesVal}"></div>
-          <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="pieces" value="${piecesVal}"></div>
+        <div class="cellwrap${canEditRow?'':' blank'}">
+          <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="styles" value="${stylesVal}" ${cRo}></div>
+          <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-cbrand="${brand.id}" data-cweek="${w.id}" data-cfield="pieces" value="${piecesVal}" ${cRo}></div>
         </div>
       </td>`;
     }).join('');
@@ -1592,7 +1703,7 @@ function renderCompletion(){
 
   return `
     <h1 class="page-title">實質完成數輸入</h1>
-    <p class="page-sub">記錄各客戶／品牌每個業務週實際完成的款數與件數。此頁僅 WRD、系統管理員可見及輸入。</p>
+    <p class="page-sub">記錄各客戶／品牌每個業務週實際完成的款數與件數。各品牌身份只可修改自己品牌的完成數，其他品牌唯讀可見；WRD、系統管理員可修改全部。</p>
     <div class="pill-row">${pillHtml}</div>
     <div class="toolbar">
       <div class="muted">月度完成合計：<strong class="num">${monthTot.pieces.toLocaleString()}</strong> 件 ／ <strong class="num">${monthTot.styles.toLocaleString()}</strong> 款</div>
@@ -1616,14 +1727,15 @@ function bindCompletion(){
       const raw = inp.value.trim();
       const val = raw==='' ? null : Math.max(0, Math.floor(Number(raw)));
       if(raw!=='' && isNaN(val)){ alert('請輸入非負整數'); render(); return; }
+      if(!canEditBrand(brandId)){ alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。'); render(); return; }
       const existing = STATE.completions.find(c=>c.brandId===brandId && c.weekId===weekId && c.status!=='cancelled' && !c.itemRef);
-      if(!existing && val==null){ render(); return; }
-      let styles = existing ? existing.styles : 0;
-      let pieces = existing ? existing.pieces : 0;
-      if(field==='styles') styles = val==null ? 0 : val;
-      if(field==='pieces') pieces = val==null ? 0 : val;
+      if(!existing && val==null) return;
+      let styles = existing ? existing.styles : null;
+      let pieces = existing ? existing.pieces : null;
+      if(field==='styles') styles = val;
+      if(field==='pieces') pieces = val;
       upsertCompletion({brandId, weekId, itemRef:'', styles, pieces, note:''});
-      persist().then(render);
+      commitEdit();
     });
   });
 }
@@ -1768,8 +1880,8 @@ function renderAudit(){
 
   const rows = limited.map(e=>{
     const week = STATE.weeks.find(w=>w.id===e.weekId);
-    const fromStr = e.from ? (e.from.styles!=null ? `${e.from.styles}款／${e.from.pieces}件` : JSON.stringify(e.from)) : '（新建）';
-    const toStr = e.to ? (e.to.styles!=null ? `${e.to.styles}款／${e.to.pieces}件` : JSON.stringify(e.to)) : '—';
+    const fromStr = e.from ? (e.from.styles!=null ? `${nz(e.from.styles)}款／${nz(e.from.pieces)}件` : JSON.stringify(e.from)) : '（新建）';
+    const toStr = e.to ? (e.to.styles!=null ? `${nz(e.to.styles)}款／${nz(e.to.pieces)}件` : JSON.stringify(e.to)) : '—';
     return `
       <tr>
         <td class="audit">${e.at}</td>
@@ -2000,7 +2112,7 @@ function bindCalendar(){
     if(!confirm('再次確認：這會清空全部同事已輸入的數字，確定要繼續嗎？')) return;
     STATE.forecasts = [];
     STATE.completions = [];
-    persist().then(()=>{
+    persist({overwrite:true}).then(()=>{
       render();
       alert('已清除所有預測數與完成數。月份、業務週與客戶名單維持不變。');
     });
@@ -2009,7 +2121,7 @@ function bindCalendar(){
   if(regenBtn) regenBtn.onclick = ()=>{
     if(!confirm('確定要重新產生所有「完全沒有資料」的業務週嗎？已有資料的月份會自動略過、不受影響。')) return;
     const result = regenerateEmptyFutureWeeks();
-    persist().then(()=>{
+    persist({overwrite:true}).then(()=>{
       render();
       let msg = '完成。\n已重新產生：' + (result.changed.length? result.changed.join('、') : '（無）');
       msg += '\n已略過（因已有資料）：' + (result.skipped.length? result.skipped.join('、') : '（無）');
@@ -2263,7 +2375,7 @@ function bindExport(){
     try{
       const parsed = JSON.parse(value);
       STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
-      persist().then(()=>{ render(); alert('已還原 '+key+' 的備份。'); });
+      persist({overwrite:true}).then(()=>{ render(); alert('已還原 '+key+' 的備份。'); });
     }catch(e){ alert('備份內容損毀：'+e.message); }
   };
 
@@ -2281,7 +2393,7 @@ function bindExport(){
           alert('檔案格式不正確，無法還原。'); return;
         }
         STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
-        persist().then(()=>{ render(); alert('已成功還原備份。'); });
+        persist({overwrite:true}).then(()=>{ render(); alert('已成功還原備份。'); });
       }catch(err){
         alert('讀取備份檔案失敗：'+err.message);
       }
