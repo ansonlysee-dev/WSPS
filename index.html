@@ -73,6 +73,8 @@
   }
   nav.tabs button.active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600;}
   nav.tabs button:hover{color:var(--ink);}
+  nav.tabs button.tab-admin{background:var(--amber-soft);color:#7A521A;font-weight:600;border-radius:3px 3px 0 0;}
+  nav.tabs button.tab-admin.active{border-bottom-color:var(--amber);color:#7A521A;}
 
   h1.page-title{font-size:19px;margin:0 0 4px;font-weight:700;}
   p.page-sub{color:var(--ink-soft);margin:0 0 20px;font-size:13px;}
@@ -258,7 +260,7 @@ const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
 
-const SYSTEM_ADMIN_NAME = 'ansontse'; // 「系統管理員」此選項僅此人可選擇（比對時忽略大小寫）
+const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
 
 const SEED_BRANDS = ["Levis Women","Levis Men","Quetico","AEO Women","AEO Men","Adidas","Levis China","UQ","ANF","Target","CAL-PD","PPC"];
 
@@ -307,7 +309,7 @@ let SAVING = false;
 
 let SESSION = {
   userName: '',
-  group: ''  // 'WRD' | 'SYSADMIN'（僅 ansontse）| 或某個客戶／品牌的 id（該品牌登入身份，只能編輯自己品牌的資料）
+  group: ''  // 'WRD' | 'SYSADMIN'（系統管理員）| 或某個客戶／品牌的 id（該品牌登入身份，只能編輯自己品牌的資料）
 };
 
 function isPrivileged(){ // WRD 或系統管理員 → 可見全部逐筆資料、可管理設定、可修改他人資料
@@ -1244,12 +1246,12 @@ function renderLogin(){
       <label>姓名</label>
       <input id="loginName" type="text" placeholder="例如：陳小華" style="width:100%;">
     </div>
-    <p class="footnote" style="margin:0 0 14px;">姓名中間不可有空格（例如「Anson Tse」可以，「An son Tse」不可以）。</p>
+    <p class="footnote" style="margin:0 0 14px;">姓名中間不可有空格（例如「陳小華」可以，「陳 小華」不可以）。</p>
     <div class="field" style="margin-bottom:20px;">
       <label>登入身份</label>
       <select id="loginGroup" style="width:100%;">
         <option value="WRD">WRD</option>
-        <option value="SYSADMIN">系統管理員（僅 ${SYSTEM_ADMIN_NAME} 可選擇）</option>
+        <option value="SYSADMIN">系統管理員</option>
         ${loginIdentityBrandOptions()}
       </select>
     </div>
@@ -1269,7 +1271,7 @@ function bindLogin(){
     if(!validateNameNoInnerSpace(rawName)){ alert('姓名中間不可有空格，請重新輸入'); return; }
     const name = rawName.trim();
     const group = groupSelect.value;
-    if(group==='SYSADMIN' && !isSystemAdminEligible(name)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); return; }
+    if(group==='SYSADMIN' && !isSystemAdminEligible(name)){ alert('此姓名不符合系統管理員身份，請改選其他登入身份。'); return; }
     SESSION.userName = name; SESSION.group = group;
     render();
   };
@@ -1284,15 +1286,20 @@ const TABS = [
   {id:'comparison', label:'完成數對比預測數', privileged:true},
   {id:'trend', label:'完成率趨勢', privileged:true},
   {id:'audit', label:'修改記錄', privileged:true},
-  {id:'calendar', label:'產能日曆與上限設定', privileged:true},
+  {id:'calendar', label:'產能日曆與上限設定', privileged:true, adminOnly:true},
   {id:'brands', label:'客戶／品牌管理', privileged:true},
   {id:'summary', label:'月度摘要（可列印）', privileged:true},
   {id:'export', label:'匯出', privileged:true},
 ];
 
+function tabAllowed(t){ // adminOnly：只有系統管理員身份可見；privileged：WRD／系統管理員可見
+  if(t.adminOnly) return SESSION.group==='SYSADMIN';
+  return !t.privileged || isPrivileged();
+}
 function renderShell(){
-  const tabsHtml = TABS.filter(t=>!t.privileged || isPrivileged()).map(t=>
-    `<button data-tab="${t.id}" class="${VIEW.tab===t.id?'active':''}">${t.label}</button>`
+  if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab) || TABS[0])) VIEW.tab = 'matrix';
+  const tabsHtml = TABS.filter(tabAllowed).map(t=>
+    `<button data-tab="${t.id}" class="${VIEW.tab===t.id?'active':''}${t.adminOnly?' tab-admin':''}">${t.label}</button>`
   ).join('');
   let body = '';
   switch(VIEW.tab){
@@ -1304,7 +1311,7 @@ function renderShell(){
     case 'comparison': body = !isPrivileged() ? renderNoAccess() : renderComparison(); break;
     case 'trend': body = !isPrivileged() ? renderNoAccess() : renderTrend(); break;
     case 'audit': body = !isPrivileged() ? renderNoAccess() : renderAudit(); break;
-    case 'calendar': body = !isPrivileged() ? renderNoAccess() : renderCalendar(); break;
+    case 'calendar': body = SESSION.group!=='SYSADMIN' ? renderNoAccess() : renderCalendar(); break;
     case 'brands': body = !isPrivileged() ? renderNoAccess() : renderBrands(); break;
     case 'summary': body = !isPrivileged() ? renderNoAccess() : renderSummary(); break;
     case 'export': body = !isPrivileged() ? renderNoAccess() : renderExport(); break;
@@ -1325,7 +1332,7 @@ function renderShell(){
           <label>登入身份</label>
           <select id="curGroup">
             <option value="WRD" ${SESSION.group==='WRD'?'selected':''}>WRD</option>
-            <option value="SYSADMIN" ${SESSION.group==='SYSADMIN'?'selected':''}>系統管理員（僅 ${SYSTEM_ADMIN_NAME}）</option>
+            <option value="SYSADMIN" ${SESSION.group==='SYSADMIN'?'selected':''}>系統管理員</option>
             ${loginIdentityBrandOptionsSelected()}
           </select>
         </div>
@@ -1361,9 +1368,9 @@ function bindShell(){
     render();
   };
   if(curGroup) curGroup.onchange = ()=>{
-    if(curGroup.value==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)){ alert('系統管理員身份僅 ' + SYSTEM_ADMIN_NAME + ' 可選擇'); render(); return; }
+    if(curGroup.value==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)){ alert('此姓名不符合系統管理員身份，請改選其他登入身份。'); render(); return; }
     SESSION.group = curGroup.value;
-    if(TABS.find(t=>t.id===VIEW.tab).privileged && !isPrivileged()) VIEW.tab='matrix';
+    if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab))) VIEW.tab='matrix';
     render();
   };
 
