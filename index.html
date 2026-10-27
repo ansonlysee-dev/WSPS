@@ -186,6 +186,28 @@
   @media (max-width:800px){.grid2{grid-template-columns:1fr;}}
   .audit{font-size:11px;color:var(--ink-soft);}
   select.status-select{font-size:11.5px;}
+  .version-badge{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ink-soft);margin-top:5px;}
+  .update-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;margin:12px 0 14px;background:var(--accent-soft);border:1px solid var(--accent);color:var(--accent);font-size:12.5px;border-radius:var(--radius);}
+  .update-banner button{border:1px solid var(--accent);background:#fff;color:var(--accent);padding:4px 9px;border-radius:var(--radius);font-size:11.5px;white-space:nowrap;}
+  .matrix-tools{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;}
+  .matrix-tools .field{min-width:220px;}
+  .cellwrap.invalid{background:var(--red-soft);}
+  .cellwrap.invalid input{border-color:var(--red);}
+  .cell-warning{font-size:9.5px;color:var(--red);line-height:1.2;}
+  @media (max-width:700px){
+    .app{padding:0 10px 56px;}
+    header.top{padding:18px 0 14px;align-items:flex-start;}
+    .brandmark .zh{font-size:17px;line-height:1.25;max-width:220px;}
+    .identity{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+    .identity .field input,.identity .field select{width:100%!important;min-width:0;}
+    nav.tabs{margin:12px 0 16px;}
+    nav.tabs button{padding:9px 11px;font-size:12px;}
+    .matrix-tools{width:100%;}
+    .matrix-tools .field{min-width:100%;}
+    .matrix-tools .field input{width:100%;}
+    .cellwrap input{min-height:30px;font-size:13px;}
+    table.matrix{min-width:900px;}
+  }
 @media print{
   header.top, nav.tabs, .no-print, .save-hint { display:none !important; }
   body{ background:#fff; }
@@ -259,6 +281,8 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
+const APP_VERSION = '2026-10-27-v1.2';
+const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
 
@@ -342,7 +366,22 @@ function validateNameNoInnerSpace(name){
   return trimmed.length>0 && !/\s/.test(trimmed); // 去除頭尾空白後，中間不可再有任何空白字元
 }
 
-let VIEW = { tab: 'matrix', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null };
+function versionUpdatePending(){
+  try { return localStorage.getItem(VERSION_SEEN_KEY) !== APP_VERSION; } catch(e) { return false; }
+}
+function acknowledgeVersion(){
+  try { localStorage.setItem(VERSION_SEEN_KEY, APP_VERSION); } catch(e) {}
+  render();
+}
+function invalidForecastPair(styles, pieces){
+  return styles != null && pieces != null && Number.isFinite(Number(styles)) && Number.isFinite(Number(pieces)) && Number(styles) > Number(pieces);
+}
+function parsePastedNumbers(text){
+  const rows = String(text||'').replace(/\r/g,'').split('\n').filter(r=>r.length>0);
+  return rows.length ? rows[0].split('\t').map(v=>v.trim()) : [];
+}
+
+let VIEW = { tab: 'matrix', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, brandQuery: '' };
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -1322,6 +1361,7 @@ function renderShell(){
       <div class="brandmark">
         <div class="zh">Washing Sample Projection System</div>
         <div class="en">WSPS · ZSYD WRD 內部系統</div>
+        <div class="version-badge">版本 ${APP_VERSION}</div>
       </div>
       <div class="identity">
         <div class="field">
@@ -1340,6 +1380,7 @@ function renderShell(){
     </header>
     ${USING_FIREBASE ? `<div class="warn-banner" style="margin-top:14px;background:var(--green-soft);border-color:var(--green);color:#2A4E36;">已連接雲端共用資料庫（Firebase），所有同事開啟此網址看到的都是同一份即時資料。</div>` : ''}
     ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。</div>` : ''}
+    ${versionUpdatePending() ? `<div class="update-banner" role="status"><span>WSPS 已更新至 <strong>${APP_VERSION}</strong>，請確認你正在使用最新版本。</span><button id="ackVersionBtn">我知道了</button></div>` : ''}
     <nav class="tabs">${tabsHtml}</nav>
     <main>${body}</main>
     ${PENDING_CONFIRM ? renderConfirmModal() : ''}
@@ -1374,6 +1415,8 @@ function bindShell(){
     render();
   };
 
+  const ackVersionBtn = document.getElementById('ackVersionBtn');
+  if(ackVersionBtn) ackVersionBtn.onclick = acknowledgeVersion;
   bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindSummary(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
 
@@ -1431,7 +1474,7 @@ function renderMatrix(){
   if(!VIEW.matrixMonthId || !months.find(m=>m.id===VIEW.matrixMonthId)) VIEW.matrixMonthId = months[0].id;
   const month = months.find(m=>m.id===VIEW.matrixMonthId);
   const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
-  const brands = STATE.brands.filter(b=>b.active);
+  const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
   const mStat = monthStatus(month);
 
   const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-monthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
@@ -1449,13 +1492,15 @@ function renderMatrix(){
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
       const stylesVal = fc && fc.styles!=null ? fc.styles : '';
       const piecesVal = fc && fc.pieces!=null ? fc.pieces : '';
+      const pairInvalid = fc && invalidForecastPair(fc.styles, fc.pieces);
       const lockedForMe = !canEditForecastCell(brand.id, w);
       const lockMsg = !canEditRow ? '此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改' : '此業務週已過，數據已鎖定，只有 WRD 或系統管理員可以修改';
       const ro = lockedForMe ? `readonly title="${lockMsg}"` : '';
       return `<td>
-        <div class="cellwrap${lockedForMe?' blank':''}">
+        <div class="cellwrap${lockedForMe?' blank':''}${pairInvalid?' invalid':''}">
           <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}" ${ro}></div>
           <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="pieces" value="${piecesVal}" ${ro}></div>
+          ${pairInvalid ? '<div class="cell-warning">款數不可多於件數</div>' : ''}
         </div>
       </td>`;
     }).join('');
@@ -1463,7 +1508,7 @@ function renderMatrix(){
       const fc = STATE.forecasts.find(f=>f.brandId===brand.id && f.weekId===w.id && f.status!=='cancelled' && !f.itemRef);
       return s + (fc? fc.pieces||0 : 0);
     },0);
-    return `<tr><td class="brandcol">${brand.name}</td>${cells}<td class="rowtotal">${rowMonthTotal.toLocaleString()} 件</td></tr>`;
+    return `<tr data-brand-row="${brand.name.toLowerCase()}"><td class="brandcol">${brand.name}</td>${cells}<td class="rowtotal">${rowMonthTotal.toLocaleString()} 件</td></tr>`;
   }).join('');
 
   const footCells = weeks.map(w=>{
@@ -1482,7 +1527,10 @@ function renderMatrix(){
     <div class="pill-row">${pillHtml}</div>
     ${banner}
     <div class="toolbar">
-      <div class="muted">月度合計：<strong class="num">${monthStatus(month).tot.pieces.toLocaleString()}</strong> 件 ／ <strong class="num">${monthStatus(month).tot.styles.toLocaleString()}</strong> 款　·　月上限 <span class="num">${monthCaps(month).pieceCap.toLocaleString()}</span> 件</div>
+      <div class="matrix-tools">
+        <div class="field"><label for="brandSearch">搜尋客戶／品牌</label><input id="brandSearch" type="search" value="${VIEW.brandQuery}" placeholder="輸入名稱即時篩選"></div>
+        <div class="muted">月度合計：<strong class="num">${monthStatus(month).tot.pieces.toLocaleString()}</strong> 件 ／ <strong class="num">${monthStatus(month).tot.styles.toLocaleString()}</strong> 款　·　月上限 <span class="num">${monthCaps(month).pieceCap.toLocaleString()}</span> 件</div>
+      </div>
       <div class="muted footnote">同一使用者再次輸入同一客戶／週別將更新既有資料，不會重複累計。留空表示「未填報」；填 0 表示「確認無預測量」。</div>
     </div>
     <div class="matrix-wrap">
@@ -1492,15 +1540,24 @@ function renderMatrix(){
         <tfoot><tr class="weekfoot"><td class="brandcol">週上限（款／件規劃）</td>${footCells}<td></td></tr></tfoot>
       </table>
     </div>
-    <p class="footnote">款數與件數輸入後失焦即自動儲存並重新計算。若本週已達或超過上限，系統會要求確認後才儲存。</p>
+    <p class="footnote">款數與件數輸入後失焦即自動儲存並重新計算。若本週已達或超過上限，系統會要求確認後才儲存。Excel 可直接貼上一整行「款、件、款、件……」數字；款數多於件數會被阻止儲存。</p>
   `;
 }
 function bindMatrix(){
   document.querySelectorAll('[data-monthpill]').forEach(p=>{
     p.onclick=()=>{ VIEW.matrixMonthId = p.dataset.monthpill; render(); };
   });
+  const brandSearch = document.getElementById('brandSearch');
+  if(brandSearch) brandSearch.oninput = ()=>{
+    VIEW.brandQuery = brandSearch.value.trim();
+    const query = VIEW.brandQuery.toLowerCase();
+    document.querySelectorAll('table.matrix tbody tr[data-brand-row]').forEach(row=>{
+      row.style.display = (!query || row.dataset.brandRow.includes(query)) ? '' : 'none';
+    });
+  };
   document.querySelectorAll('table.matrix input').forEach(inp=>{
     inp.addEventListener('change', ()=>handleMatrixInputChange(inp));
+    inp.addEventListener('paste', (event)=>handleMatrixPaste(event, inp));
   });
 }
 function handleMatrixInputChange(inp){
@@ -1528,6 +1585,11 @@ function handleMatrixInputChange(inp){
   if(field==='styles') styles = val;
   if(field==='pieces') pieces = val;
   if(!existing && val==null){ return; } // 沒有紀錄又沒輸入內容：不需處理
+  if(invalidForecastPair(styles, pieces)){
+    alert('資料不合理：款數不能多於件數。請先調整數值後再儲存。');
+    render();
+    return;
+  }
 
   const week = STATE.weeks.find(w=>w.id===weekId);
   const caps = weekCaps(week);
@@ -1561,6 +1623,42 @@ function handleMatrixInputChange(inp){
     return;
   }
   doSave(overPlanCap ? undefined : undefined);
+}
+
+function handleMatrixPaste(event, startInput){
+  const values = parsePastedNumbers(event.clipboardData && event.clipboardData.getData('text/plain'));
+  if(values.length < 2) return;
+  event.preventDefault();
+  const brandId = startInput.dataset.brand;
+  const rowInputs = [...document.querySelectorAll(`table.matrix input[data-brand="${brandId}"]`)];
+  const startIndex = rowInputs.indexOf(startInput);
+  if(startIndex < 0) return;
+  const targetInputs = rowInputs.slice(startIndex, startIndex + values.length);
+  const parsed = values.map(v=>v==='' ? null : Math.max(0, Math.floor(Number(v))));
+  if(parsed.some((v,i)=>values[i]!=='' && !Number.isFinite(v))){ alert('Excel 貼上的內容必須全部是非負整數。'); return; }
+  const byWeek = {};
+  targetInputs.forEach((input, i)=>{
+    const w = input.dataset.week;
+    byWeek[w] = byWeek[w] || {};
+    byWeek[w][input.dataset.field] = parsed[i];
+  });
+  for(const w of Object.keys(byWeek)){
+    const existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===w && f.status!=='cancelled' && !f.itemRef);
+    const styles = byWeek[w].styles !== undefined ? byWeek[w].styles : (existing ? existing.styles : null);
+    const pieces = byWeek[w].pieces !== undefined ? byWeek[w].pieces : (existing ? existing.pieces : null);
+    if(!canEditBrand(brandId) || !canEditForecastCell(brandId, STATE.weeks.find(x=>x.id===w))){ alert('Excel 貼上已取消：此品牌或業務週目前不可修改。'); return; }
+    if(invalidForecastPair(styles, pieces)){
+      alert('資料不合理：款數不能多於件數。Excel 貼上已取消，請檢查該週的款數／件數。');
+      return;
+    }
+  }
+  Object.keys(byWeek).forEach(w=>{
+    const existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===w && f.status!=='cancelled' && !f.itemRef);
+    const styles = byWeek[w].styles !== undefined ? byWeek[w].styles : (existing ? existing.styles : null);
+    const pieces = byWeek[w].pieces !== undefined ? byWeek[w].pieces : (existing ? existing.pieces : null);
+    upsertForecast({brandId, weekId:w, itemRef:'', styles, pieces, note:''});
+  });
+  commitEdit();
 }
 
 function renderConfirmModal(){
@@ -1680,7 +1778,7 @@ function renderCompletion(){
   if(!VIEW.completionMonthId || !months.find(m=>m.id===VIEW.completionMonthId)) VIEW.completionMonthId = months[0].id;
   const month = months.find(m=>m.id===VIEW.completionMonthId);
   const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
-  const brands = STATE.brands.filter(b=>b.active);
+  const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
 
   const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-compmonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
   const headerCells = weeks.map(w=>`<th style="min-width:130px;">${weekLabel(w)}</th>`).join('');
@@ -1703,7 +1801,7 @@ function renderCompletion(){
       const cm = STATE.completions.find(c=>c.brandId===brand.id && c.weekId===w.id && c.status!=='cancelled' && !c.itemRef);
       return s + (cm ? cm.pieces||0 : 0);
     },0);
-    return `<tr><td class="brandcol">${brand.name}</td>${cells}<td class="rowtotal">${rowMonthTotal.toLocaleString()} 件</td></tr>`;
+    return `<tr data-brand-row="${brand.name.toLowerCase()}"><td class="brandcol">${brand.name}</td>${cells}<td class="rowtotal">${rowMonthTotal.toLocaleString()} 件</td></tr>`;
   }).join('');
 
   const monthTot = (()=>{ let styles=0, pieces=0; weeks.forEach(w=>{ const t=weekCompletionTotals(w.id); styles+=t.styles; pieces+=t.pieces; }); return {styles,pieces}; })();
@@ -1754,7 +1852,7 @@ function renderComparison(){
   if(!VIEW.comparisonMonthId || !months.find(m=>m.id===VIEW.comparisonMonthId)) VIEW.comparisonMonthId = months[0].id;
   const month = months.find(m=>m.id===VIEW.comparisonMonthId);
   const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
-  const brands = STATE.brands.filter(b=>b.active);
+  const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
 
   const pillHtml = months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-cmpmonthpill="${m.id}">${monthLabel(m.ym)}</div>`).join('');
   const headerCells = weeks.map(w=>`<th style="min-width:150px;">${weekLabel(w)}</th>`).join('');
@@ -1832,7 +1930,7 @@ function renderTrend(){
 
   if(!VIEW.trendMonthId || !months.find(m=>m.id===VIEW.trendMonthId)) VIEW.trendMonthId = months[months.length-1].id;
   const selMonth = months.find(m=>m.id===VIEW.trendMonthId);
-  const brands = STATE.brands.filter(b=>b.active);
+  const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
   const weeksOfMonth = STATE.weeks.filter(w=>w.monthId===selMonth.id);
   const brandRows = brands.map(brand=>{
     let f=0, c=0;
@@ -1921,7 +2019,7 @@ function renderSummary(){
   const compTot = monthCompletionTotals(month);
   const overallRate = st.tot.pieces>0 ? (compTot.pieces/st.tot.pieces*100) : null;
 
-  const brands = STATE.brands.filter(b=>b.active);
+  const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
   const weeksOfMonth = STATE.weeks.filter(w=>w.monthId===month.id);
   const brandRows = brands.map(brand=>{
     let fs=0, fp=0, cs=0, cp=0;
