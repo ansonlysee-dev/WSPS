@@ -194,6 +194,12 @@
   .cellwrap.invalid{background:var(--red-soft);}
   .cellwrap.invalid input{border-color:var(--red);}
   .cell-warning{font-size:9.5px;color:var(--red);line-height:1.2;}
+  .risk-legend{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px;font-size:11.5px;color:var(--ink-soft);}
+  .risk-legend .legend-item{display:inline-flex;align-items:center;gap:4px;}
+  .risk-legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.12);}
+  .dot.normal{background:var(--green);}.dot.near{background:var(--amber);}.dot.at{background:var(--red);}.dot.over{background:var(--deep-red);}
+  .cell-meta{font-size:9px;color:var(--ink-soft);line-height:1.15;margin-top:2px;white-space:nowrap;}
+  .danger-note{font-size:11.5px;color:var(--deep-red);margin:7px 0 0;}
   @media (max-width:700px){
     .app{padding:0 10px 56px;}
     header.top{padding:18px 0 14px;align-items:flex-start;}
@@ -1163,6 +1169,16 @@ function weekLabel(week){
 }
 function brandName(id){ const b=STATE.brands.find(x=>x.id===id); return b?b.name:'(未知客戶)'; }
 
+function riskLegendHtml(){
+  return `<div class="risk-legend" aria-label="風險顏色圖例"><strong>風險圖例：</strong><span class="legend-item"><i class="dot normal"></i>正常</span><span class="legend-item"><i class="dot near"></i>接近上限</span><span class="legend-item"><i class="dot at"></i>達到上限／需覆核</span><span class="legend-item"><i class="dot over"></i>超出參考上限</span></div>`;
+}
+function latestRecordForCell(brandId, weekId){
+  const records = STATE.forecasts.filter(f=>f.brandId===brandId && f.weekId===weekId && f.status!=='cancelled' && !f.itemRef);
+  if(!records.length) return '';
+  const f = records[0];
+  return f.modifiedBy && f.modifiedAt ? `最後修改：${f.modifiedBy} · ${f.modifiedAt}` : '';
+}
+
 /* ============================= 資料操作（含稽核）============================= */
 function currentUser(){ return SESSION.userName || '(未署名使用者)'; }
 
@@ -1445,6 +1461,7 @@ function renderOverview(){
   return `
     <h1 class="page-title">未來產能總覽</h1>
     <p class="page-sub">首頁預設顯示未來 6 個月。件數以 10,000 件／月正式上限為主要預警依據；款數以各週 85 款／日上限加總為依據。</p>
+    ${riskLegendHtml()}
     <div class="month-strip">${cards || '<div class="empty">尚未建立任何規劃月份，請先於「產能日曆與上限設定」建立。</div>'}</div>
     <div class="panel">
       <h2>指標說明</h2>
@@ -1501,6 +1518,7 @@ function renderMatrix(){
           <div class="pair"><span class="tag">款</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="styles" value="${stylesVal}" ${ro}></div>
           <div class="pair"><span class="tag">件</span><input type="number" min="0" class="num" data-brand="${brand.id}" data-week="${w.id}" data-field="pieces" value="${piecesVal}" ${ro}></div>
           ${pairInvalid ? '<div class="cell-warning">款數不可多於件數</div>' : ''}
+          ${fc ? `<div class="cell-meta">${latestRecordForCell(brand.id,w.id)}</div>` : ''}
         </div>
       </td>`;
     }).join('');
@@ -1525,6 +1543,7 @@ function renderMatrix(){
     <h1 class="page-title">月度預測輸入</h1>
     <p class="page-sub">以客戶／品牌為列、業務週為欄，直接輸入預計款數與件數；系統即時重新計算週／月總量與預警。</p>
     <div class="pill-row">${pillHtml}</div>
+    ${riskLegendHtml()}
     ${banner}
     <div class="toolbar">
       <div class="matrix-tools">
@@ -2257,10 +2276,13 @@ function bindCalendar(){
   });
   document.querySelectorAll('[data-delweek]').forEach(b=>{
     b.onclick = ()=>{
-      if(confirm('刪除此業務週？若已有預測資料，建議改為調整工作日而非刪除。')){
-        STATE.weeks = STATE.weeks.filter(w=>w.id!==b.dataset.delweek);
-        persist().then(render);
-      }
+      const weekId = b.dataset.delweek;
+      const recordCount = STATE.forecasts.filter(f=>f.weekId===weekId).length + STATE.completions.filter(f=>f.weekId===weekId).length;
+      const warning = recordCount ? `此週目前有 ${recordCount} 筆預測／完成資料，刪除業務週可能令資料失去關聯。` : '此週目前沒有預測／完成資料。';
+      if(!confirm(`確定要刪除此業務週？\n\n${warning}\n\n建議優先調整工作日而非刪除。`)) return;
+      if(recordCount && !confirm('再次確認：你仍然要刪除這個已有資料的業務週嗎？')) return;
+      STATE.weeks = STATE.weeks.filter(w=>w.id!==weekId);
+      persist().then(render);
     };
   });
   document.querySelectorAll('[data-workdays]').forEach(inp=>{
@@ -2346,6 +2368,8 @@ function bindBrands(){
   document.querySelectorAll('[data-togglebrand]').forEach(b=>{
     b.onclick = ()=>{
       const brand = STATE.brands.find(x=>x.id===b.dataset.togglebrand);
+      const action = brand.active ? '停用' : '重新啟用';
+      if(!confirm(`確定要${action}品牌「${brand.name}」嗎？`)) return;
       brand.active = !brand.active;
       persist().then(render);
     };
@@ -2384,9 +2408,9 @@ function renderExport(){
     </div>
     <div class="panel">
       <h2>完整備份（JSON）</h2>
-      <p class="footnote">匯出整個系統目前的完整資料快照（月份、業務週、客戶、預測數、完成數），可用於還原資料或留存備份。建議定期匯出，避免意外覆蓋時無法復原。</p>
+      <p class="footnote">JSON 適合完整還原；Excel 適合閱讀、會議及離線分析。兩者都包含月份、業務週、客戶、預測數及完成數。建議定期下載備份。</p>
       <div class="field-row">
-        <button class="btn secondary" id="exportBackupBtn">匯出完整備份</button>
+        <button class="btn secondary" id="exportBackupBtn">匯出完整備份（JSON）</button><button class="btn secondary" id="exportFullXlsxBtn">匯出完整備份（Excel）</button>
       </div>
     </div>
     <div class="panel" style="border-color:var(--red);">
@@ -2467,6 +2491,31 @@ function bindExport(){
     a.href = url; a.download = 'WSPS_backup_'+fmtDate(new Date())+'.json';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  const fullXlsxBtn = document.getElementById('exportFullXlsxBtn');
+  if(fullXlsxBtn) fullXlsxBtn.onclick = ()=>{
+    if(typeof XLSX === 'undefined'){ alert('Excel 匯出元件載入失敗，請檢查網路連線後重試。'); return; }
+    const workbook = XLSX.utils.book_new();
+    const monthRows = [['月份','件數上限','款數上限','覆寫原因','覆寫人','覆寫時間']];
+    STATE.months.slice().sort((a,b)=>a.ym.localeCompare(b.ym)).forEach(m=>{
+      const caps = monthCaps(m);
+      monthRows.push([monthLabel(m.ym), caps.pieceCap, caps.styleCap, m.overrideReason||'', m.overrideBy||'', m.overrideAt||'']);
+    });
+    const weekRows = [['業務週起','業務週迄','規劃月份','工作日','款數上限','件數規劃上限','件數操作上限']];
+    STATE.weeks.slice().sort((a,b)=>a.startDate.localeCompare(b.startDate)).forEach(w=>{
+      const c=weekCaps(w), m=STATE.months.find(x=>x.id===w.monthId);
+      weekRows.push([w.startDate,w.endDate,m?monthLabel(m.ym):'',w.workdays,c.styleCap,c.pieceCapPlan,c.pieceCapOps]);
+    });
+    const brandRows = [['品牌','狀態']].concat(STATE.brands.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(b=>[b.name,b.active?'啟用':'停用']));
+    const recordRows = type=>{
+      const source=type==='completion'?STATE.completions:STATE.forecasts;
+      const rows=[['客戶／品牌','業務週起','業務週迄','規劃月份','項目參考','款數','件數','狀態','備註','建立人','建立時間','最後修改人','最後修改時間']];
+      source.filter(f=>f.status!=='cancelled').forEach(f=>{const w=STATE.weeks.find(x=>x.id===f.weekId),m=w&&STATE.months.find(x=>x.id===w.monthId);rows.push([brandName(f.brandId),w?w.startDate:'',w?w.endDate:'',m?monthLabel(m.ym):'',f.itemRef||'',f.styles,f.pieces,statusLabel(f.status),f.note||'',f.createdBy,f.createdAt,f.modifiedBy,f.modifiedAt]);});
+      return rows;
+    };
+    [['月份',monthRows],['業務週',weekRows],['品牌',brandRows],['預測數',recordRows('forecast')],['完成數',recordRows('completion')]].forEach(([name,rows])=>XLSX.utils.book_append_sheet(workbook,XLSX.utils.aoa_to_sheet(rows),name));
+    XLSX.writeFile(workbook,'WSPS_full_backup_'+fmtDate(new Date())+'.xlsx');
   };
 
   const cloudRestoreBtn = document.getElementById('restoreCloudBackupBtn');
