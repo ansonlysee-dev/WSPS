@@ -200,20 +200,6 @@
   .dot.normal{background:var(--green);}.dot.near{background:var(--amber);}.dot.at{background:var(--red);}.dot.over{background:var(--deep-red);}
   .cell-meta{font-size:9px;color:var(--ink-soft);line-height:1.15;margin-top:2px;white-space:nowrap;}
   .danger-note{font-size:11.5px;color:var(--deep-red);margin:7px 0 0;}
-  .sync-status{display:flex;align-items:center;gap:8px;padding:7px 11px;margin:10px 0 14px;border:1px solid var(--line);background:#FAF9F5;font-size:11.5px;color:var(--ink-soft);}
-  .sync-status.ok{border-color:var(--green);background:var(--green-soft);color:var(--green);}
-  .sync-status.saving,.sync-status.merged{border-color:var(--amber);background:var(--amber-soft);color:#7A521A;}
-  .sync-status.error{border-color:var(--red);background:var(--red-soft);color:var(--red);}
-  .sync-dot{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block;}
-  .analysis-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0 16px;}
-  .analysis-card{border:1px solid var(--line);padding:10px 12px;background:#FAF9F5;}
-  .analysis-card .label{font-size:11px;color:var(--ink-soft);}.analysis-card .value{font:600 18px 'IBM Plex Mono',monospace;margin-top:3px;}
-  .analysis-chart{display:flex;flex-direction:column;gap:8px;margin:12px 0 18px;}
-  .chart-row{display:grid;grid-template-columns:minmax(110px,170px) 1fr 80px;align-items:center;gap:8px;font-size:11.5px;}
-  .chart-track{height:18px;background:#EEECE6;border-radius:2px;overflow:hidden;position:relative;}
-  .chart-forecast{height:9px;background:var(--accent);}.chart-completion{height:9px;background:var(--green);margin-top:2px;}
-  .chart-legend{font-size:11px;color:var(--ink-soft);margin:4px 0 8px;}.chart-legend span{margin-right:12px;}.chart-legend i{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;}
-  @media (max-width:700px){.chart-row{grid-template-columns:100px 1fr 62px;font-size:10.5px;}.sync-status{font-size:11px;}}
   @media (max-width:700px){
     .app{padding:0 10px 56px;}
     header.top{padding:18px 0 14px;align-items:flex-start;}
@@ -246,7 +232,7 @@
 <!-- Firebase Firestore 共用資料層：GitHub Pages 外部部署使用 -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
   const firebaseConfig = {
     apiKey: "AIzaSyBeRtl_na0JYa7Ostmbbu1h-xGn881Min0",
     authDomain: "wsps---zsyd.firebaseapp.com",
@@ -258,48 +244,6 @@
   try {
     const db = getFirestore(initializeApp(firebaseConfig));
     const ref = doc(db, "wsps", "data");
-    const splitMetaRef = doc(db, "wspsMeta", "state");
-    const splitCollections = ["brands", "months", "weeks", "forecasts", "completions"];
-    const splitCache = {brands:[], months:[], weeks:[], forecasts:[], completions:[]};
-    const splitKey = (kind, item) => String(item.id || (kind + "-" + (item.brandId||"") + "-" + (item.weekId||"")));
-    async function readSplitData(){
-      const result = {brands:[], months:[], weeks:[], forecasts:[], completions:[]};
-      for(const kind of splitCollections){
-        const snap = await getDocs(collection(db, "wsps_" + kind));
-        result[kind] = snap.docs.map(x=>x.data());
-      }
-      const meta = await getDoc(splitMetaRef);
-      if(!meta.exists() && splitCollections.every(k=>result[k].length===0)){
-        const legacy = await getDoc(ref);
-        if(legacy.exists() && legacy.data().value){
-          const old = JSON.parse(legacy.data().value);
-          Object.assign(result, old, {_legacySource:true});
-          Object.keys(splitCache).forEach(k=>{ splitCache[k] = []; });
-          return result;
-        }
-      }
-      result._storageMode = "split-v1";
-      result._splitUpdatedAt = meta.exists() ? (meta.data().updatedAt || null) : null;
-      Object.keys(splitCache).forEach(k=>{ splitCache[k] = result[k].slice(); });
-      return result;
-    }
-    async function writeSplitData(valueStr){
-      const next = JSON.parse(valueStr);
-      const batch = writeBatch(db);
-      for(const kind of splitCollections){
-        const oldMap = new Map((splitCache[kind]||[]).map(x=>[splitKey(kind,x),x]));
-        const newMap = new Map((next[kind]||[]).map(x=>[splitKey(kind,x),x]));
-        for(const [key,item] of newMap){
-          if(JSON.stringify(oldMap.get(key)) !== JSON.stringify(item)) batch.set(doc(db, "wsps_" + kind, key), item);
-        }
-        for(const key of oldMap.keys()){ if(!newMap.has(key)) batch.delete(doc(db, "wsps_" + kind, key)); }
-      }
-      const updatedAt = Date.now();
-      batch.set(splitMetaRef, {updatedAt, mode:"split-v1", counts:Object.fromEntries(splitCollections.map(k=>[k,(next[k]||[]).length]))});
-      await batch.commit();
-      Object.keys(splitCache).forEach(k=>{ splitCache[k] = (next[k]||[]).slice(); });
-      return updatedAt;
-    }
     window.firebaseGetData = async () => {
       const snap = await getDoc(ref);
       if (!snap.exists()) return null;
@@ -318,24 +262,19 @@
       await setDoc(ref, { value, updatedAt: newVersion });
       return newVersion;
     };
-    window.firebaseGetSplitData = async () => { const d = await readSplitData(); return {value: JSON.stringify(d), updatedAt: d._splitUpdatedAt}; };
-    window.firebaseSetSplitData = async (value) => ({updatedAt: await writeSplitData(value)});
     window.firebaseSaveBackupOnce = async (key, value) => {
       const bref = doc(db, "wsps", "backup-" + key);
       const snap = await getDoc(bref);
-      if (!snap.exists()) {
-        const parsed = JSON.parse(value);
-        await setDoc(bref, { value, savedAt: Date.now(), source:"auto-daily", counts:{brands:(parsed.brands||[]).length,months:(parsed.months||[]).length,weeks:(parsed.weeks||[]).length,forecasts:(parsed.forecasts||[]).length,completions:(parsed.completions||[]).length} });
-        return true;
-      }
+      if (!snap.exists()) { await setDoc(bref, { value, savedAt: Date.now() }); return true; }
       return false;
     };
     window.firebaseGetBackup = async (key) => {
       const snap = await getDoc(doc(db, "wsps", "backup-" + key));
       return snap.exists() ? snap.data().value : null;
     };
-    window.firebaseListen = (callback) => onSnapshot(ref, snap => { if (snap.exists()) { const d = snap.data(); callback(d.value, d.updatedAt); } });
-    window.firebaseListenSplit = (callback) => onSnapshot(splitMetaRef, async snap => { if (snap.exists()) { const d = await readSplitData(); callback(JSON.stringify(d), d._splitUpdatedAt || snap.data().updatedAt); } });
+    window.firebaseListen = (callback) => onSnapshot(ref, snap => {
+      if (snap.exists()) { const d = snap.data(); callback(d.value, d.updatedAt); }
+    });
     window.firebaseError = null;
   } catch (error) { window.firebaseError = error; }
   window.dispatchEvent(new Event('firebase-ready'));
@@ -348,7 +287,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-10-28-v2.0';
+const APP_VERSION = '2026-10-27-v1.2';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -449,7 +388,6 @@ function parsePastedNumbers(text){
 }
 
 let VIEW = { tab: 'matrix', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, brandQuery: '' };
-let SYNC_STATUS = 'ok', SYNC_MESSAGE = '尚未同步', LAST_SYNC_AT = null;
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -469,19 +407,16 @@ function withTimeout(promise, ms, label){
 let REMOTE_VERSION = null; // 最後一次已知的雲端版本戳記，用於偵測「舊分頁／其他人已搶先儲存」的衝突
 async function storageGet(){
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
-  requireSharedStorage(); setSyncStatus('saving','正在讀取雲端資料…');
-  const getter = window.firebaseGetSplitData || window.firebaseGetData;
-  const r = await withTimeout(getter(), 15000, '讀取雲端資料');
+  requireSharedStorage();
+  const r = await withTimeout(window.firebaseGetData(), 15000, '讀取雲端資料');
   if(r) REMOTE_VERSION = r.updatedAt;
-  setSyncStatus('ok','已同步雲端資料');
   return r ? {value: r.value} : null;
 }
 async function storageSet(valueStr){
   if(HAS_CLOUD_STORAGE) return await window.storage.set(STORAGE_KEY, valueStr, true);
-  requireSharedStorage(); setSyncStatus('saving','儲存中…');
-  const result = window.firebaseSetSplitData ? await withTimeout(window.firebaseSetSplitData(valueStr), 12000, '寫入拆分資料') : await withTimeout(window.firebaseSetData(valueStr, REMOTE_VERSION), 6000, '寫入雲端資料');
-  REMOTE_VERSION = result.updatedAt || Date.now();
-  setSyncStatus('ok','已同步');
+  requireSharedStorage();
+  const newVersion = await withTimeout(window.firebaseSetData(valueStr, REMOTE_VERSION), 6000, '寫入雲端資料');
+  REMOTE_VERSION = newVersion;
   return {value: valueStr};
 }
 
@@ -520,9 +455,8 @@ async function loadState(){
   runWorkdaysCapMigration();
   await persist();
   LOADED = true;
-  if(USING_FIREBASE && (window.firebaseListenSplit || window.firebaseListen)){
-    const listen = window.firebaseListenSplit || window.firebaseListen;
-    listen((valueStr, updatedAt)=>{
+  if(USING_FIREBASE && window.firebaseListen){
+    window.firebaseListen((valueStr, updatedAt)=>{
       if(updatedAt===REMOTE_VERSION) return; // 自己剛寫入的版本，或已知版本
       try{
         const remote = Object.assign(STATE_DEFAULTS(), JSON.parse(valueStr));
@@ -530,8 +464,8 @@ async function loadState(){
         const before = JSON.stringify(STATE);
         STATE = mergeStates(BASE_STATE, STATE, remote);
         BASE_STATE = cloneState(remote);
-        if(JSON.stringify(STATE)!==before){ setSyncStatus('merged','已接收其他同事更新'); softRender(); }
-      }catch(e){ setSyncStatus('error','同步資料格式錯誤：'+e.message); console.error('同步資料格式錯誤', e); }
+        if(JSON.stringify(STATE)!==before) softRender();
+      }catch(e){ console.error('同步資料格式錯誤', e); }
     });
   }
 }
@@ -665,7 +599,6 @@ async function persistNow(opts){
     }
   }catch(e){
     CLOUD_ERROR = e;
-    setSyncStatus('error','同步失敗：'+(e.message||'未知錯誤'));
     console.error('儲存失敗', e);
   }finally{
     SAVING = false;
@@ -1236,13 +1169,6 @@ function weekLabel(week){
 }
 function brandName(id){ const b=STATE.brands.find(x=>x.id===id); return b?b.name:'(未知客戶)'; }
 
-function currentYm(){ const d=new Date(); return d.getFullYear()+'-'+pad(d.getMonth()+1); }
-function previousYm(){ const d=new Date(); d.setMonth(d.getMonth()-1); return d.getFullYear()+'-'+pad(d.getMonth()+1); }
-function frontMonths(months){ const minYm=previousYm(); return months.filter(m=>m.ym>=minYm); }
-function defaultMonthId(months){ const ym=currentYm(); return (months.find(m=>m.ym===ym) || months.find(m=>m.ym>ym) || months[months.length-1] || {}).id || null; }
-function historicalMonths(months){ return months.filter(m=>m.ym<currentYm()); }
-function setSyncStatus(status, message){ SYNC_STATUS=status; SYNC_MESSAGE=message; LAST_SYNC_AT=Date.now(); const el=document.getElementById('syncStatus'); if(el){ el.className='sync-status '+status; el.innerHTML=`<span class="sync-dot"></span><span>${message}</span>`; } }
-function syncStatusHtml(){ return `<div id="syncStatus" class="sync-status ${SYNC_STATUS}"><span class="sync-dot"></span><span>${SYNC_MESSAGE}${LAST_SYNC_AT?' · '+new Date(LAST_SYNC_AT).toLocaleString('zh-HK'):''}</span></div>`; }
 function riskLegendHtml(){
   return `<div class="risk-legend" aria-label="風險顏色圖例"><strong>風險圖例：</strong><span class="legend-item"><i class="dot normal"></i>正常</span><span class="legend-item"><i class="dot near"></i>接近上限</span><span class="legend-item"><i class="dot at"></i>達到上限／需覆核</span><span class="legend-item"><i class="dot over"></i>超出參考上限</span></div>`;
 }
@@ -1469,7 +1395,6 @@ function renderShell(){
       </div>
     </header>
     ${USING_FIREBASE ? `<div class="warn-banner" style="margin-top:14px;background:var(--green-soft);border-color:var(--green);color:#2A4E36;">已連接雲端共用資料庫（Firebase），所有同事開啟此網址看到的都是同一份即時資料。</div>` : ''}
-    ${syncStatusHtml()}
     ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。</div>` : ''}
     ${versionUpdatePending() ? `<div class="update-banner" role="status"><span>WSPS 已更新至 <strong>${APP_VERSION}</strong>，請確認你正在使用最新版本。</span><button id="ackVersionBtn">我知道了</button></div>` : ''}
     <nav class="tabs">${tabsHtml}</nav>
@@ -1513,7 +1438,7 @@ function bindShell(){
 
 /* ============================= 總覽 ============================= */
 function renderOverview(){
-  const months = frontMonths([...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym)));
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
   const cards = months.map(m=>{
     const st = monthStatus(m);
     const caps = st.caps, tot = st.tot;
@@ -1561,10 +1486,9 @@ function bindOverview(){
 
 /* ============================= 月度預測輸入（矩陣）============================= */
 function renderMatrix(){
-  const allMonths = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
-  const months = frontMonths(allMonths);
-  if(months.length===0) return `<div class="empty">目前沒有當月或上一個月的輸入月份；歷史資料仍可在後台查詢。</div>`;
-  if(!VIEW.matrixMonthId || !months.find(m=>m.id===VIEW.matrixMonthId)) VIEW.matrixMonthId = defaultMonthId(months);
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份，請管理員先於「產能日曆與上限設定」建立。</div>`;
+  if(!VIEW.matrixMonthId || !months.find(m=>m.id===VIEW.matrixMonthId)) VIEW.matrixMonthId = months[0].id;
   const month = months.find(m=>m.id===VIEW.matrixMonthId);
   const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
   const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
@@ -1868,10 +1792,9 @@ function bindMine(){
 
 /* ============================= 實質完成數輸入（僅 WRD／系統管理員）============================= */
 function renderCompletion(){
-  const allMonths = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
-  const months = frontMonths(allMonths);
-  if(months.length===0) return `<div class="empty">目前沒有當月或上一個月的完成數輸入月份；歷史資料仍可在後台查詢。</div>`;
-  if(!VIEW.completionMonthId || !months.find(m=>m.id===VIEW.completionMonthId)) VIEW.completionMonthId = defaultMonthId(months);
+  const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  if(months.length===0) return `<div class="empty">尚未建立規劃月份，請先於「產能日曆與上限設定」建立。</div>`;
+  if(!VIEW.completionMonthId || !months.find(m=>m.id===VIEW.completionMonthId)) VIEW.completionMonthId = months[0].id;
   const month = months.find(m=>m.id===VIEW.completionMonthId);
   const weeks = STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
   const brands = STATE.brands.filter(b=>b.active && (!VIEW.brandQuery || b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
@@ -2461,32 +2384,6 @@ function bindBrands(){
   });
 }
 
-/* ============================= 歷史預計數 vs 完成數分析 ============================= */
-function historicalAnalysis(monthId, brandQuery){
-  const eligibleMonths = historicalMonths(STATE.months);
-  const monthIds = monthId ? new Set([monthId]) : new Set(eligibleMonths.map(m=>m.id));
-  const weekIds = new Set(STATE.weeks.filter(w=>monthIds.has(w.monthId)).map(w=>w.id));
-  const rows = STATE.brands.filter(b=>b.active && (!brandQuery || b.name.toLowerCase().includes(brandQuery.toLowerCase()))).map(b=>{
-    const fs=STATE.forecasts.filter(f=>f.brandId===b.id&&weekIds.has(f.weekId)&&f.status!=='cancelled'&&!f.itemRef);
-    const cs=STATE.completions.filter(c=>c.brandId===b.id&&weekIds.has(c.weekId)&&c.status!=='cancelled'&&!c.itemRef);
-    const forecastStyles=fs.reduce((n,f)=>n+(f.styles||0),0), forecastPieces=fs.reduce((n,f)=>n+(f.pieces||0),0);
-    const completeStyles=cs.reduce((n,c)=>n+(c.styles||0),0), completePieces=cs.reduce((n,c)=>n+(c.pieces||0),0);
-    return {brand:b.name,forecastStyles,forecastPieces,completeStyles,completePieces,forecastWeeks:fs.length,completeWeeks:cs.length,availableWeeks:new Set([...fs.map(f=>f.weekId),...cs.map(c=>c.weekId)]).size, piecesRate:forecastPieces?completePieces/forecastPieces*100:null, styleRate:forecastStyles?completeStyles/forecastStyles*100:null};
-  }).filter(r=>r.forecastWeeks||r.completeWeeks).sort((a,b)=>(a.piecesRate??-1)-(b.piecesRate??-1));
-  return {rows, eligibleMonths};
-}
-function historicalAnalysisHtml(){
-  const months=historicalMonths([...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym)));
-  const chosen=document.getElementById('analysisMonth')?.value || VIEW.exportMonthId || '';
-  const query=document.getElementById('analysisBrand')?.value || '';
-  const data=historicalAnalysis(chosen,query), rows=data.rows;
-  const totalF=rows.reduce((n,r)=>n+r.forecastPieces,0), totalC=rows.reduce((n,r)=>n+r.completePieces,0);
-  const max=Math.max(1,...rows.map(r=>Math.max(r.forecastPieces,r.completePieces)));
-  const chart=rows.filter(r=>r.forecastPieces||r.completePieces).slice(0,12).map(r=>`<div class="chart-row"><span>${r.brand}</span><div class="chart-track"><div class="chart-forecast" style="width:${Math.round(r.forecastPieces/max*100)}%" title="預計 ${r.forecastPieces}"></div><div class="chart-completion" style="width:${Math.round(r.completePieces/max*100)}%" title="完成 ${r.completePieces}"></div></div><span class="num">${r.piecesRate==null?'資料不足':r.piecesRate.toFixed(1)+'%'}</span></div>`).join('');
-  const table=rows.map(r=>`<tr><td>${r.brand}</td><td class="num">${r.forecastPieces.toLocaleString()}</td><td class="num">${r.completePieces.toLocaleString()}</td><td class="num">${(r.completePieces-r.forecastPieces).toLocaleString()}</td><td class="num">${r.piecesRate==null?'資料不足':r.piecesRate.toFixed(1)+'%'}</td><td class="num">${r.forecastWeeks}/${r.completeWeeks}/${r.availableWeeks}</td></tr>`).join('');
-  return `<div class="analysis-summary"><div class="analysis-card"><div class="label">歷史預計件數</div><div class="value">${totalF.toLocaleString()}</div></div><div class="analysis-card"><div class="label">歷史完成件數</div><div class="value">${totalC.toLocaleString()}</div></div><div class="analysis-card"><div class="label">整體達成率</div><div class="value">${totalF?((totalC/totalF)*100).toFixed(1)+'%':'—'}</div></div><div class="analysis-card"><div class="label">分析品牌數</div><div class="value">${rows.length}</div></div></div><div class="chart-legend"><span><i style="background:var(--accent)"></i>預計件數</span><span><i style="background:var(--green)"></i>完成件數</span></div><div class="analysis-chart">${chart||'<div class="empty">沒有可分析的歷史資料</div>'}</div><table class="plain"><thead><tr><th>品牌</th><th>預計件數</th><th>完成件數</th><th>差異</th><th>達成率</th><th>週數（預計／完成／可用）</th></tr></thead><tbody>${table||'<tr><td colspan="6" class="empty">沒有可分析的歷史資料</td></tr>'}</tbody></table>`;
-}
-
 /* ============================= 匯出 ============================= */
 function renderExport(){
   const months = [...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
@@ -2515,12 +2412,6 @@ function renderExport(){
       <div class="field-row">
         <button class="btn secondary" id="exportBackupBtn">匯出完整備份（JSON）</button><button class="btn secondary" id="exportFullXlsxBtn">匯出完整備份（Excel）</button>
       </div>
-    </div>
-    <div class="panel">
-      <h2>歷史預計數 vs 完成數品牌分析</h2>
-      <p class="footnote">只統計已過去月份，不包括本月或未來月份。未填完成數不會被當成完成 0。</p>
-      <div class="field-row"><div class="field"><label>歷史月份</label><select id="analysisMonth"><option value="">所有歷史月份</option>${historicalMonths(months).map(m=>`<option value="${m.id}">${monthLabel(m.ym)}</option>`).join('')}</select></div><div class="field"><label>品牌搜尋</label><input id="analysisBrand" placeholder="可留空"></div><button class="btn secondary" id="refreshAnalysisBtn">更新分析</button></div>
-      <div id="historicalAnalysisBody">${historicalAnalysisHtml()}</div>
     </div>
     <div class="panel" style="border-color:var(--red);">
       <h2 style="color:var(--red);">還原備份</h2>
@@ -2627,9 +2518,6 @@ function bindExport(){
     XLSX.writeFile(workbook,'WSPS_full_backup_'+fmtDate(new Date())+'.xlsx');
   };
 
-  const refreshAnalysisBtn=document.getElementById('refreshAnalysisBtn');
-  if(refreshAnalysisBtn) refreshAnalysisBtn.onclick=()=>{ const body=document.getElementById('historicalAnalysisBody'); if(body) body.innerHTML=historicalAnalysisHtml(); };
-
   const cloudRestoreBtn = document.getElementById('restoreCloudBackupBtn');
   if(cloudRestoreBtn) cloudRestoreBtn.onclick = async ()=>{
     const key = document.getElementById('cloudBackupDate').value;
@@ -2677,7 +2565,7 @@ function bindExport(){
       window.addEventListener('firebase-ready', resolve, {once:true});
       setTimeout(resolve, 5000);
     });
-    USING_FIREBASE = !!(window.firebaseGetSplitData || window.firebaseGetData) && !window.firebaseError;
+    USING_FIREBASE = !!window.firebaseGetData && !window.firebaseError;
     if(!USING_FIREBASE){
       CLOUD_ERROR = window.firebaseError || new Error('WSPS 共用資料庫未連線。');
       const hint = document.getElementById('saveHint');
