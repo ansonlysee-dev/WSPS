@@ -290,7 +290,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-10-28-v1.3-safe';
+const APP_VERSION = '2026-10-30-home-input-review';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -390,7 +390,7 @@ function parsePastedNumbers(text){
   return rows.length ? rows[0].split('\t').map(v=>v.trim()) : [];
 }
 
-let VIEW = { tab: 'matrix', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, analysisMonthId: '', brandQuery: '' };
+let VIEW = { tab: 'excelhome', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, analysisMonthId: '', brandQuery: '' };
 let SYNC_STATUS='ok', SYNC_MESSAGE='尚未同步', LAST_SYNC_AT=null, BACKUP_MESSAGE='每日自動備份已啟用（沿用現有 Firebase 備份路徑）';
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
@@ -1342,7 +1342,8 @@ function bindLogin(){
 }
 
 const TABS = [
-  {id:'matrix', label:'月度預測輸入', privileged:false},
+  {id:'excelhome', label:'當月總表輸入', privileged:false},
+  {id:'matrix', label:'詳細預測輸入', privileged:false},
   {id:'completion', label:'實質完成數輸入', privileged:false},
   {id:'overview', label:'未來產能總覽', privileged:false},
   {id:'weekly', label:'週度明細', privileged:true},
@@ -1367,6 +1368,7 @@ function renderShell(){
   ).join('');
   let body = '';
   switch(VIEW.tab){
+    case 'excelhome': body = renderExcelHome(); break;
     case 'overview': body = renderOverview(); break;
     case 'matrix': body = renderMatrix(); break;
     case 'weekly': body = !isPrivileged() ? renderNoAccess() : renderWeekly(); break;
@@ -1443,7 +1445,7 @@ function bindShell(){
 
   const ackVersionBtn = document.getElementById('ackVersionBtn');
   if(ackVersionBtn) ackVersionBtn.onclick = acknowledgeVersion;
-  bindOverview(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindSummary(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
+  bindOverview(); bindExcelHome(); bindMatrix(); bindWeekly(); bindMine(); bindCompletion(); bindComparison(); bindTrend(); bindAudit(); bindSummary(); bindCalendar(); bindBrands(); bindExport(); bindConfirmModal();
 }
 
 /* ============================= 總覽 ============================= */
@@ -1492,6 +1494,40 @@ function bindOverview(){
   document.querySelectorAll('[data-drill]').forEach(b=>{
     b.onclick=()=>{ VIEW.matrixMonthId = b.dataset.drill; VIEW.tab='matrix'; render(); };
   });
+}
+
+/* ============================= Excel 式首頁（預測＋完成直接輸入） ============================= */
+function renderExcelHome(){
+  const months=frontMonths([...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym)));
+  if(!months.length) return '<div class="empty">目前沒有可顯示的月份。</div>';
+  if(!VIEW.matrixMonthId || !months.find(m=>m.id===VIEW.matrixMonthId)) VIEW.matrixMonthId=defaultMonthId(months);
+  const month=months.find(m=>m.id===VIEW.matrixMonthId), weeks=STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const brands=STATE.brands.filter(b=>b.active && (!VIEW.brandQuery||b.name.toLowerCase().includes(VIEW.brandQuery.toLowerCase())));
+  const sum={fs:0,fp:0,cs:0,cp:0};
+  function rec(kind,brandId,weekId){const a=(kind==='forecast'?STATE.forecasts:STATE.completions).find(x=>x.brandId===brandId&&x.weekId===weekId&&x.status!=='cancelled'&&!x.itemRef);return a||{};}
+  function input(brandId,w,kind,field){const r=rec(kind,brandId,w.id), v=r[field]!=null?r[field]:''; const editable=kind==='forecast'?canEditForecastCell(brandId,w):canEditBrand(brandId); const title=editable?'直接輸入數字':'此資料目前不可修改'; return `<input type="number" min="0" class="num home-input" data-home-kind="${kind}" data-brand="${brandId}" data-week="${w.id}" data-field="${field}" value="${v}" ${editable?'':'readonly'} title="${title}">`;}
+  function rate(a,b){return a?Math.round(b/a*100)+'%':'—';}
+  const weekHead=weeks.map(w=>`<th colspan="5" style="min-width:245px;">${weekLabel(w)}</th>`).join('');
+  const subHead=weeks.map(()=>'<th>預計款／件</th><th>完成款／件</th><th>達成率</th><th>容量</th><th>狀態</th>').join('');
+  const rows=brands.map(b=>{let m={fs:0,fp:0,cs:0,cp:0}, cells='';weeks.forEach(w=>{const f=rec('forecast',b.id,w.id),c=rec('completion',b.id,w.id);const fs=Number(f.styles||0),fp=Number(f.pieces||0),cs=Number(c.styles||0),cp=Number(c.pieces||0);m.fs+=fs;m.fp+=fp;m.cs+=cs;m.cp+=cp;const invalid=(f.styles!=null&&f.pieces!=null&&Number(f.styles)>Number(f.pieces))||(c.styles!=null&&c.pieces!=null&&Number(c.styles)>Number(c.pieces));const ws=weekStatus(w);cells+=`<td class="home-pair forecast">${input(b.id,w,'forecast','styles')} <span>/</span> ${input(b.id,w,'forecast','pieces')}</td><td class="home-pair complete">${input(b.id,w,'completion','styles')} <span>/</span> ${input(b.id,w,'completion','pieces')}</td><td class="${Math.abs(cs-fs)>(fs||1)*.1?'over':''}">${rate(fs,cs)}<br><small>${rate(fp,cp)}</small></td><td>${ws.tot.pieces}/${ws.caps.pieceCapPlan} 件</td><td class="${ws.level==='normal'?'':'over'}">${ws.level==='normal'?'正常':'需覆核'}</td>`});Object.keys(sum).forEach(k=>sum[k]+=m[k]);return `<tr><td class="brandcol">${b.name}</td><td class="num forecast">${m.fs.toLocaleString()}／${m.fp.toLocaleString()}</td><td class="num complete">${m.cs.toLocaleString()}／${m.cp.toLocaleString()}</td><td class="num ${Math.abs(m.cs-m.fs)>(m.fs||1)*.1?'over':''}">${rate(m.fs,m.cs)}<br><small>${rate(m.fp,m.cp)}</small></td>${cells}<td class="footnote">${invalid?'款數不可多於件數':''}</td></tr>`}).join('');
+  return `<h1 class="page-title">${monthLabel(month.ym)}總表</h1><p class="page-sub">首頁直接輸入：藍色格為預計，綠色格為完成；月度總數及達成率自動計算。所有保存仍沿用現有 Firebase 資料路徑。</p><div class="pill-row">${months.map(m=>`<div class="pill ${m.id===month.id?'active':''}" data-home-month="${m.id}">${monthLabel(m.ym)}</div>`).join('')}</div>${monthStatus(month).level!=='normal'?`<div class="warn-banner ${monthStatus(month).level}">${monthStatus(month).reasons.map(r=>'<div>'+r+'</div>').join('')}</div>`:''}<div class="toolbar"><div class="matrix-tools"><div class="field"><label for="homeBrandSearch">搜尋客戶／品牌</label><input id="homeBrandSearch" type="search" value="${VIEW.brandQuery||''}" placeholder="輸入名稱即時篩選"></div><div class="muted">月度預計：<strong class="num">${sum.fs.toLocaleString()} 款／${sum.fp.toLocaleString()} 件</strong>　完成：<strong class="num">${sum.cs.toLocaleString()} 款／${sum.cp.toLocaleString()} 件</strong></div></div></div><div class="matrix-wrap"><table class="matrix excel-home"><thead><tr><th class="brandcol" rowspan="2">客戶／品牌</th><th rowspan="2" class="forecast">月預計<br>款／件</th><th rowspan="2" class="complete">月完成<br>款／件</th><th rowspan="2">達成率<br>款／件</th>${weekHead}<th rowspan="2">備註／提示</th></tr><tr>${subHead}</tr></thead><tbody>${rows||'<tr><td colspan="99" class="empty">沒有符合搜尋的品牌</td></tr>'}</tbody><tfoot><tr class="weekfoot"><td class="brandcol">總計</td><td class="forecast">${sum.fs.toLocaleString()}／${sum.fp.toLocaleString()}</td><td class="complete">${sum.cs.toLocaleString()}／${sum.cp.toLocaleString()}</td><td>${rate(sum.fs,sum.cs)}<br><small>${rate(sum.fp,sum.cp)}</small></td>${weeks.map(w=>{const t=weekTotals(w.id),c=weekCaps(w);return `<td colspan="5">${t.styles}/${c.styleCap} 款 · ${t.pieces}/${c.pieceCapPlan} 件</td>`}).join('')}<td></td></tr></tfoot></table></div><p class="footnote">輸入後失焦會沿用現有保存、版本衝突合併及自動備份流程。網絡斷線會顯示未同步，不會用空白資料覆蓋雲端。</p>`;
+}
+function bindExcelHome(){
+  document.querySelectorAll('[data-home-month]').forEach(p=>p.onclick=()=>{VIEW.matrixMonthId=p.dataset.homeMonth;render();});
+  const q=document.getElementById('homeBrandSearch'); if(q) q.oninput=()=>{VIEW.brandQuery=q.value.trim();document.querySelectorAll('.excel-home tbody tr').forEach(r=>{r.style.display=(!VIEW.brandQuery||r.textContent.toLowerCase().includes(VIEW.brandQuery.toLowerCase()))?'':'none';});};
+  document.querySelectorAll('.home-input').forEach(inp=>inp.addEventListener('change',()=>handleHomeInputChange(inp)));
+}
+function handleHomeInputChange(inp){
+  const kind=inp.dataset.homeKind, brandId=inp.dataset.brand, weekId=inp.dataset.week, field=inp.dataset.field;
+  const raw=inp.value.trim(), val=raw===''?null:Math.max(0,Math.floor(Number(raw)));
+  if(raw!==''&&!Number.isFinite(val)){alert('請輸入非負整數');render();return;}
+  if(kind==='forecast'){
+    const proxy={dataset:{brand:brandId,week:weekId,field},value:raw}; handleMatrixInputChange(proxy); return;
+  }
+  if(!canEditBrand(brandId)){alert('此品牌資料目前不可修改。');render();return;}
+  const existing=STATE.completions.find(c=>c.brandId===brandId&&c.weekId===weekId&&c.status!=='cancelled'&&!c.itemRef);let styles=existing?existing.styles:null,pieces=existing?existing.pieces:null;if(field==='styles')styles=val;if(field==='pieces')pieces=val;
+  if((styles!=null&&pieces!=null&&Number(styles)>Number(pieces))){alert('資料不合理：款數不能多於件數。');render();return;}
+  upsertCompletion({brandId,weekId,itemRef:'',styles,pieces,note:''});commitEdit();
 }
 
 /* ============================= 月度預測輸入（矩陣）============================= */
