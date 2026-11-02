@@ -306,7 +306,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-10-30-home-input-review';
+const APP_VERSION = '2026-11-02-hide-input-tabs';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -1359,8 +1359,9 @@ function bindLogin(){
 
 const TABS = [
   {id:'excelhome', label:'當月總表輸入', privileged:false},
-  {id:'matrix', label:'詳細預測輸入', privileged:false},
-  {id:'completion', label:'實質完成數輸入', privileged:false},
+  // Excel 式首頁已可直接輸入；保留底層頁面及資料流程，但不在前台顯示入口。
+  {id:'matrix', label:'詳細預測輸入', privileged:false, hiddenFrontend:true},
+  {id:'completion', label:'實質完成數輸入', privileged:false, hiddenFrontend:true},
   {id:'overview', label:'未來產能總覽', privileged:false},
   {id:'weekly', label:'週度明細', privileged:true},
   {id:'mine', label:'我的預測', privileged:false},
@@ -1374,11 +1375,12 @@ const TABS = [
 ];
 
 function tabAllowed(t){ // adminOnly：只有系統管理員身份可見；privileged：WRD／系統管理員可見
+  if(t.hiddenFrontend) return false;
   if(t.adminOnly) return SESSION.group==='SYSADMIN';
   return !t.privileged || isPrivileged();
 }
 function renderShell(){
-  if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab) || TABS[0])) VIEW.tab = 'matrix';
+  if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab) || TABS[0])) VIEW.tab = 'excelhome';
   const tabsHtml = TABS.filter(tabAllowed).map(t=>
     `<button data-tab="${t.id}" class="${VIEW.tab===t.id?'active':''}${t.adminOnly?' tab-admin':''}">${t.label}</button>`
   ).join('');
