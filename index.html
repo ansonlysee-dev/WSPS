@@ -306,7 +306,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-02-hide-input-tabs';
+const APP_VERSION = '2026-11-10-phase1-safety';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -351,7 +351,8 @@ let STATE = {
   months: [],   // {id, ym:'2026-09', label, pieceCapOverride, overrideReason, overrideBy, overrideAt}
   weeks: [],    // {id, monthId, startDate, endDate, workdays, styleCapOverride, pieceCapPlanOverride, pieceCapOpsOverride, overrideReason, overrideBy, overrideAt}
   forecasts: [], // {id, brandId, weekId, itemRef, styles, pieces, note, status, createdBy, createdAt, modifiedBy, modifiedAt, history:[]}
-  completions: [] // 實質完成數，結構同 forecasts 一樣，僅 WRD／系統管理員可輸入與查看
+  completions: [], // 實質完成數，結構同 forecasts 一樣，僅 WRD／系統管理員可輸入與查看
+  auditLogs: [] // 正式稽核記錄：只新增，不依賴畫面 history
 };
 let LOADED = false;
 let SAVING = false;
@@ -408,6 +409,10 @@ function parsePastedNumbers(text){
 
 let VIEW = { tab: 'excelhome', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, analysisMonthId: '', brandQuery: '' };
 let SYNC_STATUS='ok', SYNC_MESSAGE='尚未同步', LAST_SYNC_AT=null, BACKUP_MESSAGE='每日自動備份已啟用（沿用現有 Firebase 備份路徑）';
+let ONLINE = typeof navigator==='undefined' ? true : navigator.onLine !== false;
+let RETRY_TIMER = null;
+let EDIT_SOURCE = 'web-ui';
+let CONFLICT_NOTICE = null;
 let PENDING_CONFIRM = null; // for over-cap confirm modal
 
 /* ============================= 儲存層 ============================= */
@@ -426,15 +431,39 @@ function withTimeout(promise, ms, label){
 }
 let REMOTE_VERSION = null; // 最後一次已知的雲端版本戳記，用於偵測「舊分頁／其他人已搶先儲存」的衝突
 async function storageGet(){
+  if(!ONLINE) throw new Error('目前未連線，無法讀取雲端資料');
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
   requireSharedStorage(); setSyncStatus('saving','正在讀取雲端資料…');
   const r=await withTimeout(window.firebaseGetData(),15000,'讀取雲端資料');
   if(r) REMOTE_VERSION=r.updatedAt; setSyncStatus('ok','已同步雲端資料'); return r?{value:r.value}:null;
 }
 async function storageSet(valueStr){
+  if(!ONLINE) throw new Error('目前未連線，修改尚未寫入雲端');
   if(HAS_CLOUD_STORAGE) return await window.storage.set(STORAGE_KEY,valueStr,true);
   requireSharedStorage(); setSyncStatus('saving','儲存中…');
   const v=await withTimeout(window.firebaseSetData(valueStr,REMOTE_VERSION),6000,'寫入雲端資料'); REMOTE_VERSION=v; setSyncStatus('ok','已同步'); return {value:valueStr};
+}
+function validateStateForWrite(state){
+  if(!state || !Array.isArray(state.brands)||!Array.isArray(state.months)||!Array.isArray(state.weeks)||!Array.isArray(state.forecasts)||!Array.isArray(state.completions)) throw new Error('資料格式不完整，已阻止寫入');
+  const brandIds=new Set(state.brands.map(b=>b&&b.id).filter(Boolean));
+  const weekIds=new Set(state.weeks.map(w=>w&&w.id).filter(Boolean));
+  const seen=new Set();
+  for(const collection of [state.forecasts,state.completions]){
+    for(const r of collection){
+      if(!r||!r.id||!brandIds.has(r.brandId)||!weekIds.has(r.weekId)) throw new Error('資料關聯無效：品牌或業務週不存在，已阻止寫入');
+      const allowedFields=new Set(['id','brandId','weekId','itemRef','styles','pieces','note','status','createdBy','createdAt','modifiedBy','modifiedAt','history']);
+      if(Object.keys(r).some(k=>!allowedFields.has(k))) throw new Error('資料含有不明欄位，已阻止寫入');
+      for(const field of ['styles','pieces']){
+        const v=r[field];
+        if(v!=null && (!Number.isInteger(Number(v)) || Number(v)<0 || Number(v)>1000000)) throw new Error('數值必須是 0 至 1,000,000 的整數，已阻止寫入');
+      }
+      if(r.styles!=null&&r.pieces!=null&&Number(r.styles)>Number(r.pieces)) throw new Error('資料不合理：款數不能多於件數，已阻止寫入');
+      const key=collection===state.forecasts?'f':'c'; const unique=key+'|'+r.brandId+'|'+r.weekId+'|'+(r.itemRef||'');
+      if(r.status!=='cancelled'){ if(seen.has(unique)) throw new Error('發現重複品牌／週次資料，已阻止寫入'); seen.add(unique); }
+    }
+  }
+  if(!Array.isArray(state.auditLogs)) state.auditLogs=[];
+  return true;
 }
 
 let LOAD_FAILED = false; // 讀取雲端資料失敗時為 true：此時絕不可用預設資料覆蓋雲端
@@ -446,7 +475,7 @@ async function loadState(){
     const r = await storageGet();
     if(r && r.value){
       const parsed = JSON.parse(r.value);
-      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[],auditLogs:[]}, parsed);
       BASE_STATE = cloneState(STATE);
       loadedFromCloud = true; rawValue = r.value;
     } else {
@@ -540,9 +569,9 @@ function runHardResetSept2026Migration(){
    - 儲存撞版時：不再放棄，而是讀取最新雲端資料，逐筆（以 id 為單位）三方合併，再重試儲存。
    - 收到他人更新時：同樣三方合併，只在畫面上有變化時才更新；若你正在輸入，等你離開該格後才刷新，不會洗走正在輸入的內容。 */
 let BASE_STATE = null;     // 最後一次與雲端同步成功時的資料快照（三方合併的「共同祖先」）
-let DIRTY = false, DIRTY_SEQ = 0, SAVE_TIMER = null, NEEDS_RENDER = false, MERGED_ON_CONFLICT = false;
+let DIRTY = false, DIRTY_SEQ = 0, SAVE_TIMER = null, NEEDS_RENDER = false, MERGED_ON_CONFLICT = false, BLOCK_RETRY = false;
 let PERSIST_QUEUE = Promise.resolve();
-const STATE_DEFAULTS = ()=>({brands:[],months:[],weeks:[],forecasts:[],completions:[]});
+const STATE_DEFAULTS = ()=>({brands:[],months:[],weeks:[],forecasts:[],completions:[],auditLogs:[]});
 function cloneState(o){ return JSON.parse(JSON.stringify(o)); }
 function nz(v){ return v==null ? '—' : v; } // 未填報顯示為「—」，與填 0 區分
 
@@ -570,8 +599,8 @@ function mergeById(base, local, remote){
 }
 function mergeStates(base, local, remote){
   const out = Object.assign({}, remote);
-  ['brands','months','weeks','forecasts','completions'].forEach(k=>{
-    out[k] = mergeById(base && base[k], local[k], remote[k]);
+  ['brands','months','weeks','forecasts','completions','auditLogs'].forEach(k=>{
+    out[k] = mergeById(base && base[k], local[k]||[], remote[k]||[]);
   });
   Object.keys(local).forEach(k=>{ if(k.startsWith('_') && local[k] && !out[k]) out[k]=local[k]; }); // 遷移旗標取聯集
   return out;
@@ -583,6 +612,9 @@ function persist(opts){
 }
 async function persistNow(opts){
   if(LOAD_FAILED){ alert('目前無法讀取雲端資料，為避免覆蓋已停止所有儲存。請重新整理頁面後再試。'); return; }
+  if(!ONLINE){ setSyncStatus('error','目前未連線：修改已暫留，網絡恢復後會自動重試'); return; }
+  BLOCK_RETRY = false;
+  try{ validateStateForWrite(STATE); }catch(validationError){ CLOUD_ERROR=validationError; setSyncStatus('error',validationError.message); return; }
   const seq = DIRTY_SEQ;
   let succeeded = false;
   try{
@@ -594,16 +626,10 @@ async function persistNow(opts){
         succeeded = true;
       }catch(e){
         if(e && e.isVersionConflict && USING_FIREBASE){
-          const r = await withTimeout(window.firebaseGetData(), 15000, '讀取雲端資料');
-          if(!r) throw e;
-          REMOTE_VERSION = r.updatedAt;
-          if(!opts.overwrite){
-            const remote = Object.assign(STATE_DEFAULTS(), JSON.parse(r.value));
-            STATE = mergeStates(BASE_STATE, STATE, remote);
-            BASE_STATE = cloneState(remote);
-            MERGED_ON_CONFLICT = true;
-          }
-          continue; // 以最新版本號重試
+          CONFLICT_NOTICE='其他同事已先更新雲端資料。';
+          BLOCK_RETRY=true;
+          setSyncStatus('error','同步衝突：未覆蓋其他同事的更新');
+          return;
         }
         throw e;
       }
@@ -619,6 +645,7 @@ async function persistNow(opts){
     setSyncStatus('error','同步失敗：'+(e.message||'未知錯誤'));
     console.error('儲存失敗', e);
   }finally{
+    if(!succeeded && DIRTY && ONLINE && !BLOCK_RETRY){ clearTimeout(RETRY_TIMER); RETRY_TIMER=setTimeout(()=>persist(),5000); }
     SAVING = false;
     const hint = document.getElementById('saveHint');
     if(hint){
@@ -634,7 +661,8 @@ async function persistNow(opts){
 function commitEdit(){
   DIRTY = true; DIRTY_SEQ++;
   const hint = document.getElementById('saveHint');
-  if(hint){ hint.textContent = '儲存中…'; hint.classList.add('show'); }
+  if(hint){ hint.textContent = ONLINE ? '儲存中…' : '未連線：修改暫留本機'; hint.classList.add('show'); }
+  if(!ONLINE) setSyncStatus('error','目前未連線：修改已暫留，尚未寫入雲端');
   clearTimeout(SAVE_TIMER);
   SAVE_TIMER = setTimeout(()=>{ persist(); }, 1000);
   setTimeout(renderKeepFocus, 0);
@@ -1193,7 +1221,20 @@ function frontMonths(months){return months.filter(m=>m.ym>=previousYm());}
 function defaultMonthId(months){const ym=currentYm();return (months.find(m=>m.ym===ym)||months.find(m=>m.ym>ym)||months[months.length-1]||{}).id||null;}
 function historicalMonths(months){return months.filter(m=>m.ym<currentYm());}
 function setSyncStatus(status,message){SYNC_STATUS=status;SYNC_MESSAGE=message;LAST_SYNC_AT=Date.now();const el=document.getElementById('syncStatus');if(el){el.className='sync-status '+status;el.innerHTML='<span class="sync-dot"></span><span>'+message+'</span>';}}
-function syncStatusHtml(){return '<div id="syncStatus" class="sync-status '+SYNC_STATUS+'"><span class="sync-dot"></span><span>'+SYNC_MESSAGE+(LAST_SYNC_AT?' · '+new Date(LAST_SYNC_AT).toLocaleString('zh-HK'):'')+'</span></div>';}
+function syncStatusHtml(){return '<div id="syncStatus" class="sync-status '+SYNC_STATUS+'"><span class="sync-dot"></span><span>'+SYNC_MESSAGE+(LAST_SYNC_AT?' · '+new Date(LAST_SYNC_AT).toLocaleString('zh-HK'):'')+'</span></div>'+(CONFLICT_NOTICE?'<div class="warn-banner over" role="alert"><strong>同步衝突：</strong>'+CONFLICT_NOTICE+' 本機修改仍保留，請先確認最新資料後再重試。</div>':'');}
+function setNetworkStatus(isOnline){
+  ONLINE=!!isOnline;
+  if(ONLINE){
+    if(DIRTY && !SAVING){ setSyncStatus('saving','網絡已恢復，正在重試未同步修改…'); clearTimeout(RETRY_TIMER); RETRY_TIMER=setTimeout(()=>persist(),300); }
+    else if(!CLOUD_ERROR) setSyncStatus('ok','網絡已連線');
+  }else{
+    setSyncStatus('error','目前未連線：修改會暫留本機，尚未寫入雲端');
+  }
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('offline',()=>setNetworkStatus(false));
+  window.addEventListener('online',()=>setNetworkStatus(true));
+}
 function riskLegendHtml(){
   return `<div class="risk-legend" aria-label="風險顏色圖例"><strong>風險圖例：</strong><span class="legend-item"><i class="dot normal"></i>正常</span><span class="legend-item"><i class="dot near"></i>接近上限</span><span class="legend-item"><i class="dot at"></i>達到上限／需覆核</span><span class="legend-item"><i class="dot over"></i>超出參考上限</span></div>`;
 }
@@ -1206,15 +1247,23 @@ function latestRecordForCell(brandId, weekId){
 
 /* ============================= 資料操作（含稽核）============================= */
 function currentUser(){ return SESSION.userName || '(未署名使用者)'; }
+function appendAuditLog({entityType, recordId, brandId, weekId, field, before, after, source}){
+  STATE.auditLogs = Array.isArray(STATE.auditLogs) ? STATE.auditLogs : [];
+  if(JSON.stringify(before)===JSON.stringify(after)) return;
+  STATE.auditLogs.push({id:uid('audit'),entityType,recordId,brandId,weekId,field,before:before==null?null:before,after:after==null?null:after,by:currentUser(),at:nowStr(),source:source||EDIT_SOURCE||'web-ui'});
+  if(STATE.auditLogs.length>5000) STATE.auditLogs=STATE.auditLogs.slice(-5000);
+}
 
 function upsertForecast({brandId, weekId, itemRef, styles, pieces, note}, forceStatus){
   itemRef = itemRef || '';
   let existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===weekId && (f.itemRef||'')===itemRef && f.status!=='cancelled');
   const ts = nowStr();
   if(existing){
+    const before={styles:existing.styles,pieces:existing.pieces,note:existing.note};
     existing.history = existing.history || [];
-    existing.history.push({at:ts, by:currentUser(), from:{styles:existing.styles, pieces:existing.pieces, note:existing.note}, to:{styles, pieces, note}});
+    existing.history.push({at:ts, by:currentUser(), from:before, to:{styles, pieces, note}});
     existing.styles = styles; existing.pieces = pieces; existing.note = note;
+    ['styles','pieces','note'].forEach(field=>appendAuditLog({entityType:'forecast',recordId:existing.id,brandId,weekId,field,before:before[field],after:existing[field],source:EDIT_SOURCE}));
     existing.modifiedBy = currentUser(); existing.modifiedAt = ts;
     if(forceStatus) existing.status = forceStatus;
     else if(existing.status==='draft') existing.status='active';
@@ -1226,6 +1275,7 @@ function upsertForecast({brandId, weekId, itemRef, styles, pieces, note}, forceS
       history: [{at:ts, by:currentUser(), from:null, to:{styles,pieces,note}}]
     };
     STATE.forecasts.push(existing);
+    ['styles','pieces','note'].forEach(field=>appendAuditLog({entityType:'forecast',recordId:existing.id,brandId,weekId,field,before:null,after:existing[field],source:EDIT_SOURCE}));
   }
   return existing;
 }
@@ -1235,7 +1285,8 @@ function cancelForecast(id){
   if(!canEditForecastCell(f.brandId, STATE.weeks.find(w=>w.id===f.weekId))) return false; // 防禦性檢查：非本品牌、已鎖定週（非 WRD／系統管理員）不可取消
   f.history = f.history||[];
   f.history.push({at:nowStr(), by:currentUser(), from:{status:f.status}, to:{status:'cancelled'}});
-  f.status='cancelled'; f.modifiedBy=currentUser(); f.modifiedAt=nowStr();
+  const beforeStatus=f.status; f.status='cancelled'; f.modifiedBy=currentUser(); f.modifiedAt=nowStr();
+  appendAuditLog({entityType:'forecast',recordId:f.id,brandId:f.brandId,weekId:f.weekId,field:'status',before:beforeStatus,after:'cancelled',source:EDIT_SOURCE});
 }
 
 /* ============================= 實質完成數（僅 WRD／系統管理員）============================= */
@@ -1254,9 +1305,11 @@ function upsertCompletion({brandId, weekId, itemRef, styles, pieces, note}){
   let existing = STATE.completions.find(c=>c.brandId===brandId && c.weekId===weekId && (c.itemRef||'')===itemRef && c.status!=='cancelled');
   const ts = nowStr();
   if(existing){
+    const before={styles:existing.styles,pieces:existing.pieces,note:existing.note};
     existing.history = existing.history || [];
-    existing.history.push({at:ts, by:currentUser(), from:{styles:existing.styles, pieces:existing.pieces, note:existing.note}, to:{styles, pieces, note}});
+    existing.history.push({at:ts, by:currentUser(), from:before, to:{styles, pieces, note}});
     existing.styles = styles; existing.pieces = pieces; existing.note = note;
+    ['styles','pieces','note'].forEach(field=>appendAuditLog({entityType:'completion',recordId:existing.id,brandId,weekId,field,before:before[field],after:existing[field],source:EDIT_SOURCE}));
     existing.modifiedBy = currentUser(); existing.modifiedAt = ts;
   } else {
     existing = {
@@ -1266,6 +1319,7 @@ function upsertCompletion({brandId, weekId, itemRef, styles, pieces, note}){
       history: [{at:ts, by:currentUser(), from:null, to:{styles,pieces,note}}]
     };
     STATE.completions.push(existing);
+    ['styles','pieces','note'].forEach(field=>appendAuditLog({entityType:'completion',recordId:existing.id,brandId,weekId,field,before:null,after:existing[field],source:EDIT_SOURCE}));
   }
   return existing;
 }
@@ -1457,7 +1511,7 @@ function bindShell(){
   if(curGroup) curGroup.onchange = ()=>{
     if(curGroup.value==='SYSADMIN' && !isSystemAdminEligible(SESSION.userName)){ alert('此姓名不符合系統管理員身份，請改選其他登入身份。'); render(); return; }
     SESSION.group = curGroup.value;
-    if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab))) VIEW.tab='matrix';
+    if(!tabAllowed(TABS.find(t=>t.id===VIEW.tab))) VIEW.tab='excelhome';
     render();
   };
 
@@ -1538,6 +1592,7 @@ function bindExcelHome(){
   document.querySelectorAll('.home-input').forEach(inp=>inp.addEventListener('change',()=>handleHomeInputChange(inp)));
 }
 function handleHomeInputChange(inp){
+  EDIT_SOURCE='excel-home';
   const kind=inp.dataset.homeKind, brandId=inp.dataset.brand, weekId=inp.dataset.week, field=inp.dataset.field;
   const raw=inp.value.trim(), val=raw===''?null:Math.max(0,Math.floor(Number(raw)));
   if(raw!==''&&!Number.isFinite(val)){alert('請輸入非負整數');render();return;}
@@ -1646,6 +1701,7 @@ function bindMatrix(){
   });
 }
 function handleMatrixInputChange(inp){
+  if(EDIT_SOURCE!=='excel-home') EDIT_SOURCE='matrix-input';
   const brandId = inp.dataset.brand, weekId = inp.dataset.week, field = inp.dataset.field;
   let raw = inp.value.trim();
   let val = raw==='' ? null : Math.max(0, Math.floor(Number(raw)));
@@ -1711,6 +1767,7 @@ function handleMatrixInputChange(inp){
 }
 
 function handleMatrixPaste(event, startInput){
+  EDIT_SOURCE='excel-paste';
   const values = parsePastedNumbers(event.clipboardData && event.clipboardData.getData('text/plain'));
   if(values.length < 2) return;
   event.preventDefault();
@@ -2058,13 +2115,11 @@ function bindTrend(){
 
 /* ============================= 修改記錄（僅 WRD／系統管理員）============================= */
 function renderAudit(){
-  const entries = [];
-  STATE.forecasts.forEach(f=>{
-    (f.history||[]).forEach(h=>entries.push({type:'預測數', brandId:f.brandId, weekId:f.weekId, itemRef:f.itemRef, ...h}));
-  });
-  STATE.completions.forEach(c=>{
-    (c.history||[]).forEach(h=>entries.push({type:'完成數', brandId:c.brandId, weekId:c.weekId, itemRef:c.itemRef, ...h}));
-  });
+  const entries = Array.isArray(STATE.auditLogs) && STATE.auditLogs.length ? STATE.auditLogs.map(x=>({type:x.entityType==='completion'?'完成數':'預測數',brandId:x.brandId,weekId:x.weekId,at:x.at,by:x.by,field:x.field,source:x.source,from:x.before,to:x.after})) : [];
+  if(!entries.length){
+    STATE.forecasts.forEach(f=>{ (f.history||[]).forEach(h=>entries.push({type:'預測數', brandId:f.brandId, weekId:f.weekId, itemRef:f.itemRef, ...h})); });
+    STATE.completions.forEach(c=>{ (c.history||[]).forEach(h=>entries.push({type:'完成數', brandId:c.brandId, weekId:c.weekId, itemRef:c.itemRef, ...h})); });
+  }
   entries.sort((a,b)=>b.at.localeCompare(a.at));
   const limited = entries.slice(0, 300);
 
@@ -2079,7 +2134,7 @@ function renderAudit(){
         <td><span class="badge">${e.type}</span></td>
         <td>${brandName(e.brandId)}${e.itemRef?'<div class="footnote">項目：'+e.itemRef+'</div>':''}</td>
         <td>${week?weekLabel(week):'—'}</td>
-        <td class="footnote">${fromStr} → ${toStr}</td>
+        <td class="footnote">${e.field||''} ${fromStr} → ${toStr}<br><span class="muted">來源：${e.source||'歷史記錄'}</span></td>
       </tr>`;
   }).join('');
 
@@ -2608,7 +2663,7 @@ function bindExport(){
     if(!confirm('確定要用 '+key+' 的備份完全覆蓋目前所有資料嗎？此操作不可復原。')) return;
     try{
       const parsed = JSON.parse(value);
-      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+      STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[],auditLogs:[]}, parsed);
       persist({overwrite:true}).then(()=>{ render(); alert('已還原 '+key+' 的備份。'); });
     }catch(e){ alert('備份內容損毀：'+e.message); }
   };
@@ -2626,7 +2681,7 @@ function bindExport(){
         if(!parsed || !Array.isArray(parsed.brands) || !Array.isArray(parsed.months) || !Array.isArray(parsed.weeks)){
           alert('檔案格式不正確，無法還原。'); return;
         }
-        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[]}, parsed);
+        STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[],auditLogs:[]}, parsed);
         persist({overwrite:true}).then(()=>{ render(); alert('已成功還原備份。'); });
       }catch(err){
         alert('讀取備份檔案失敗：'+err.message);
@@ -2652,6 +2707,7 @@ function bindExport(){
       if(hint){ hint.textContent = '未連線：目前不可同步'; hint.classList.add('show'); }
     }
   }
+  setNetworkStatus(typeof navigator==='undefined' ? true : navigator.onLine);
   await loadState();
   render();
 })();
