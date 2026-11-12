@@ -251,7 +251,7 @@
 <!-- Firebase Firestore 共用資料層：GitHub Pages 外部部署使用 -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, getDocs, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
   const firebaseConfig = {
     apiKey: "AIzaSyBeRtl_na0JYa7Ostmbbu1h-xGn881Min0",
     authDomain: "wsps---zsyd.firebaseapp.com",
@@ -284,8 +284,28 @@
     window.firebaseSaveBackupOnce = async (key, value) => {
       const bref = doc(db, "wsps", "backup-" + key);
       const snap = await getDoc(bref);
-      if (!snap.exists()) { await setDoc(bref, { value, savedAt: Date.now() }); return true; }
+      if (!snap.exists()) { await setDoc(bref, { value, savedAt: Date.now(), bytes: String(value||'').length }); return true; }
       return false;
+    };
+    async function sha256Text(value){
+      const bytes = new TextEncoder().encode(String(value||''));
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      return [...new Uint8Array(digest)].map(x=>x.toString(16).padStart(2,'0')).join('');
+    }
+    window.firebaseVerifyBackup = async (key, expectedValue) => {
+      const snap = await getDoc(doc(db, "wsps", "backup-" + key));
+      if (!snap.exists()) return {exists:false, readable:false, key};
+      const d=snap.data(), value=typeof d.value==='string'?d.value:null;
+      if(value==null) return {exists:true, readable:false, key, bytes:0, savedAt:d.savedAt||null};
+      return {exists:true, readable:true, key, bytes:value.length, savedAt:d.savedAt||null, hash:await sha256Text(value), expectedHash:await sha256Text(expectedValue), hashMatches:await sha256Text(value)===await sha256Text(expectedValue)};
+    };
+    window.firebaseWriteAuditLog = async (log) => {
+      await setDoc(doc(db, "wsps_audit_logs", log.id), Object.assign({}, log, {savedAt:Date.now()}));
+      return true;
+    };
+    window.firebaseGetAuditLogs = async () => {
+      const snap = await getDocs(query(collection(db, "wsps_audit_logs"), orderBy('at','desc'), limit(1000)));
+      return snap.docs.map(x=>x.data());
     };
     window.firebaseGetBackup = async (key) => {
       const snap = await getDoc(doc(db, "wsps", "backup-" + key));
@@ -306,7 +326,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-10-phase1-safety';
+const APP_VERSION = '2026-11-12-audit-backup-safety';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -409,6 +429,12 @@ function parsePastedNumbers(text){
 
 let VIEW = { tab: 'excelhome', matrixMonthId: null, weeklyDetailWeekId: null, exportMonthId: null, completionMonthId: null, comparisonMonthId: null, trendMonthId: null, summaryMonthId: null, analysisMonthId: '', brandQuery: '' };
 let SYNC_STATUS='ok', SYNC_MESSAGE='尚未同步', LAST_SYNC_AT=null, BACKUP_MESSAGE='每日自動備份已啟用（沿用現有 Firebase 備份路徑）';
+let BACKUP_VERIFICATION=null;
+let AUDIT_REMOTE=[];
+let AUDIT_PENDING=[];
+const AUDIT_OUTBOX_KEY='wsps:audit-outbox:v1';
+try{ AUDIT_PENDING=JSON.parse(localStorage.getItem(AUDIT_OUTBOX_KEY)||'[]'); if(!Array.isArray(AUDIT_PENDING)) AUDIT_PENDING=[]; }catch(e){ AUDIT_PENDING=[]; }
+function saveAuditOutbox(){ try{localStorage.setItem(AUDIT_OUTBOX_KEY,JSON.stringify(AUDIT_PENDING.slice(-1000)));}catch(e){} }
 let ONLINE = typeof navigator==='undefined' ? true : navigator.onLine !== false;
 let RETRY_TIMER = null;
 let EDIT_SOURCE = 'web-ui';
@@ -491,7 +517,20 @@ async function loadState(){
   }
   // 每日一次自動備份（取當日第一次載入時的雲端資料，之後當日的修改不會覆蓋此備份）
   if(loadedFromCloud && USING_FIREBASE && window.firebaseSaveBackupOnce){
-    window.firebaseSaveBackupOnce(todayKey(), rawValue).then(()=>{BACKUP_MESSAGE='今日自動備份已完成或已存在（Firebase）';}).catch(e=>{BACKUP_MESSAGE='自動備份失敗：'+e.message; console.warn('自動備份失敗', e);});
+    const backupKey=todayKey();
+    window.firebaseSaveBackupOnce(backupKey, rawValue).then(async()=>{
+      if(!window.firebaseVerifyBackup) throw new Error('備份驗證介面未啟用');
+      const result=await window.firebaseVerifyBackup(backupKey, rawValue);
+      BACKUP_VERIFICATION=result;
+      if(!result.exists) throw new Error('今日備份不存在');
+      if(!result.readable) throw new Error('今日備份存在但內容不可讀取');
+      if(!result.hashMatches) throw new Error('今日備份內容 Hash 與主資料不一致');
+      BACKUP_MESSAGE='今日備份已驗證：存在、可讀取、Hash 一致（'+result.bytes.toLocaleString()+' bytes）';
+      softRender();
+    }).catch(e=>{BACKUP_MESSAGE='每日備份驗證失敗：'+e.message; BACKUP_VERIFICATION={exists:false,readable:false,error:e.message}; setSyncStatus('error',BACKUP_MESSAGE); softRender(); console.warn('備份驗證失敗', e);});
+  }
+  if(loadedFromCloud && USING_FIREBASE && window.firebaseGetAuditLogs){
+    window.firebaseGetAuditLogs().then(logs=>{ AUDIT_REMOTE=Array.isArray(logs)?logs:[]; softRender(); }).catch(e=>{ console.warn('讀取獨立 Audit Log 失敗',e); });
   }
   runHardResetSept2026Migration();
   runHistoricalImportMigration();
@@ -637,6 +676,7 @@ async function persistNow(opts){
     if(succeeded){
       BASE_STATE = cloneState(STATE);
       if(DIRTY_SEQ===seq) DIRTY = false;
+      flushAuditLogs();
     } else {
       CLOUD_ERROR = new Error('多次儲存都與他人更新衝突，請稍後再試');
     }
@@ -1252,6 +1292,17 @@ function appendAuditLog({entityType, recordId, brandId, weekId, field, before, a
   if(JSON.stringify(before)===JSON.stringify(after)) return;
   STATE.auditLogs.push({id:uid('audit'),entityType,recordId,brandId,weekId,field,before:before==null?null:before,after:after==null?null:after,by:currentUser(),at:nowStr(),source:source||EDIT_SOURCE||'web-ui'});
   if(STATE.auditLogs.length>5000) STATE.auditLogs=STATE.auditLogs.slice(-5000);
+  AUDIT_PENDING.push(STATE.auditLogs[STATE.auditLogs.length-1]);
+  saveAuditOutbox();
+}
+async function flushAuditLogs(){
+  if(!USING_FIREBASE || !ONLINE || !window.firebaseWriteAuditLog || !AUDIT_PENDING.length) return;
+  const queue=AUDIT_PENDING.slice();
+  for(const log of queue){
+    try{ await window.firebaseWriteAuditLog(log); AUDIT_PENDING=AUDIT_PENDING.filter(x=>x.id!==log.id); saveAuditOutbox(); }
+    catch(e){ console.warn('獨立 Audit Log 保存失敗',e); setSyncStatus('error','主資料已保存，但 Audit Log 尚未同步'); return; }
+  }
+  if(!AUDIT_PENDING.length) setSyncStatus('ok','主資料及 Audit Log 已同步');
 }
 
 function upsertForecast({brandId, weekId, itemRef, styles, pieces, note}, forceStatus){
@@ -1479,6 +1530,7 @@ function renderShell(){
     </header>
     ${USING_FIREBASE ? `<div class="warn-banner" style="margin-top:14px;background:var(--green-soft);border-color:var(--green);color:#2A4E36;">已連接雲端共用資料庫（Firebase），所有同事開啟此網址看到的都是同一份即時資料。</div>` : ''}
     ${syncStatusHtml()}
+    ${USING_FIREBASE ? `<div class="footnote" style="margin:0 0 12px;">備份狀態：${BACKUP_MESSAGE}</div>` : ''}
     ${USING_LOCAL_FALLBACK ? `<div class="warn-banner near" style="margin-top:14px;">此頁面目前僅儲存在本機瀏覽器（未偵測到雲端共用儲存），資料<strong>不會</strong>與其他同事同步，清除瀏覽器資料也會遺失。</div>` : ''}
     ${versionUpdatePending() ? `<div class="update-banner" role="status"><span>WSPS 已更新至 <strong>${APP_VERSION}</strong>，請確認你正在使用最新版本。</span><button id="ackVersionBtn">我知道了</button></div>` : ''}
     <nav class="tabs">${tabsHtml}</nav>
@@ -2115,7 +2167,8 @@ function bindTrend(){
 
 /* ============================= 修改記錄（僅 WRD／系統管理員）============================= */
 function renderAudit(){
-  const entries = Array.isArray(STATE.auditLogs) && STATE.auditLogs.length ? STATE.auditLogs.map(x=>({type:x.entityType==='completion'?'完成數':'預測數',brandId:x.brandId,weekId:x.weekId,at:x.at,by:x.by,field:x.field,source:x.source,from:x.before,to:x.after})) : [];
+  const sourceLogs = AUDIT_REMOTE.length ? AUDIT_REMOTE : STATE.auditLogs;
+  const entries = Array.isArray(sourceLogs) && sourceLogs.length ? sourceLogs.map(x=>({type:x.entityType==='completion'?'完成數':'預測數',brandId:x.brandId,weekId:x.weekId,at:x.at,by:x.by,field:x.field,source:x.source,from:x.before,to:x.after})) : [];
   if(!entries.length){
     STATE.forecasts.forEach(f=>{ (f.history||[]).forEach(h=>entries.push({type:'預測數', brandId:f.brandId, weekId:f.weekId, itemRef:f.itemRef, ...h})); });
     STATE.completions.forEach(c=>{ (c.history||[]).forEach(h=>entries.push({type:'完成數', brandId:c.brandId, weekId:c.weekId, itemRef:c.itemRef, ...h})); });
@@ -2709,6 +2762,7 @@ function bindExport(){
   }
   setNetworkStatus(typeof navigator==='undefined' ? true : navigator.onLine);
   await loadState();
+  await flushAuditLogs();
   render();
 })();
 </script>
