@@ -242,7 +242,7 @@
   @media(max-width:800px){.excel-home-page{margin:-8px -10px -56px;padding:16px 10px 30px}.excel-home-page .demo-top{display:block}.excel-home-page .demo-right{text-align:left;margin-top:12px}.excel-home-page .demo-title{font-size:22px}.excel-summary{grid-template-columns:repeat(2,1fr)}.excel-summary .summary-card:last-child{grid-column:span 2}.excel-toolbar .demo-legend{width:100%;margin-left:0}}
 
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 </head>
 <body>
 <div class="app" id="app"></div>
@@ -333,7 +333,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-13-home-excel-export';
+const APP_VERSION = '2026-11-13-home-excel-design';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -2698,22 +2698,36 @@ function buildHomepageExcelReport(monthId){
   return {rows,merges,month,weeks};
 }
 function styleHomepageExcelSheet(ws, report){
-  ws['!merges']=report.merges; ws['!cols']=[{wch:28},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},...report.weeks.flatMap(()=>[{wch:10},{wch:10},{wch:10},{wch:10},{wch:11},{wch:14}])];
-  const dark={fill:{fgColor:{rgb:'1E1B16'}},font:{bold:true,color:{rgb:'FFFFFF'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
-  const forecast={fill:{fgColor:{rgb:'DDE4EC'}},font:{color:{rgb:'2F4665'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
-  const complete={fill:{fgColor:{rgb:'DEEBE2'}},font:{color:{rgb:'3F6B4B'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
-  const total={fill:{fgColor:{rgb:'F6E9D3'}},font:{bold:true},alignment:{horizontal:'center',vertical:'center'}};
+  const lastCol=report.rows[0].length-1, lastRow=report.rows.length-1;
+  ws['!merges']=report.merges;
+  ws['!cols']=[{wch:28},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},...report.weeks.flatMap(()=>[{wch:10},{wch:10},{wch:10},{wch:10},{wch:11},{wch:16}])];
+  ws['!rows']=[{hpt:30},{hpt:22},{hpt:30},{hpt:30},...Array(Math.max(0,report.rows.length-4)).fill({hpt:22})];
+  ws['!autofilter']={ref:XLSX.utils.encode_range({s:{r:2,c:0},e:{r:lastRow,c:lastCol}})};
+  ws['!freeze']={xSplit:1,ySplit:4};
+  const border={top:{style:'thin',color:{rgb:'D9D5C9'}},bottom:{style:'thin',color:{rgb:'D9D5C9'}},left:{style:'thin',color:{rgb:'D9D5C9'}},right:{style:'thin',color:{rgb:'D9D5C9'}}};
+  const dark={fill:{patternType:'solid',fgColor:{rgb:'1E1B16'}},font:{bold:true,color:{rgb:'FFFFFF'},name:'Arial',sz:10},alignment:{horizontal:'center',vertical:'center',wrapText:true},border};
+  const forecast={fill:{patternType:'solid',fgColor:{rgb:'DDEAF6'}},font:{color:{rgb:'2F4665'},name:'Arial',sz:10},alignment:{horizontal:'center',vertical:'center'},border};
+  const complete={fill:{patternType:'solid',fgColor:{rgb:'E0F0E5'}},font:{color:{rgb:'3F6B4B'},name:'Arial',sz:10},alignment:{horizontal:'center',vertical:'center'},border};
+  const neutral={fill:{patternType:'solid',fgColor:{rgb:'FFFFFF'}},font:{color:{rgb:'24221F'},name:'Arial',sz:10},alignment:{horizontal:'center',vertical:'center'},border};
+  const total={fill:{patternType:'solid',fgColor:{rgb:'F6E9D3'}},font:{bold:true,color:{rgb:'24221F'},name:'Arial',sz:10},alignment:{horizontal:'center',vertical:'center'},border};
+  const title={font:{bold:true,color:{rgb:'24221F'},name:'Arial',sz:16},alignment:{horizontal:'left',vertical:'center'}};
   const cell=(r,c)=>XLSX.utils.encode_cell({r,c});
-  for(let c=0;c<report.rows[0].length;c++) if(ws[cell(0,c)]) ws[cell(0,c)].s={font:{bold:true,sz:16},alignment:{horizontal:'left'}};
-  for(let c=0;c<report.rows[2].length;c++){if(ws[cell(2,c)])ws[cell(2,c)].s=dark;if(ws[cell(3,c)])ws[cell(3,c)].s=dark;}
-  for(let r=4;r<report.rows.length;r++){
-    if(ws[cell(r,0)]) ws[cell(r,0)].s={font:{bold:r===report.rows.length-1}};
-    for(let c=1;c<report.rows[r].length;c++) if(ws[cell(r,c)]){
-      const isTotal=r===report.rows.length-1; const weekOffset=c>=7?(c-7)%6:-1;
-      ws[cell(r,c)].s=isTotal?total:(weekOffset===0||weekOffset===1||c===1||c===2?forecast:(weekOffset===2||weekOffset===3||c===3||c===4?complete:{alignment:{horizontal:'center',vertical:'center'}}));
+  for(let c=0;c<=lastCol;c++){if(ws[cell(0,c)])ws[cell(0,c)].s=title;if(ws[cell(1,c)])ws[cell(1,c)].s={font:{color:{rgb:'746F66'},name:'Arial',sz:10},alignment:{horizontal:c===0||c===2?'left':'center',vertical:'center'}};}
+  for(let r=2;r<=3;r++)for(let c=0;c<=lastCol;c++)if(ws[cell(r,c)])ws[cell(r,c)].s=dark;
+  for(let r=4;r<=lastRow;r++){
+    const isTotal=r===lastRow;
+    for(let c=0;c<=lastCol;c++){
+      const ref=cell(r,c), v=ws[ref]&&ws[ref].v;
+      if(!ws[ref]) continue;
+      if(c===0){ws[ref].s=isTotal?total:{fill:{patternType:'solid',fgColor:{rgb:r%2?'FFFFFF':'FAF9F5'}},font:{bold:true,color:{rgb:'24221F'},name:'Arial',sz:10},alignment:{horizontal:'left',vertical:'center'},border};continue;}
+      const offset=c>=7?(c-7)%6:-1;
+      let st=isTotal?total:(c===1||c===2||offset===0||offset===1?forecast:(c===3||c===4||offset===2||offset===3?complete:neutral));
+      if(typeof v==='string' && (v==='接近上限'||v==='需覆核'||v==='超出上限')) st=Object.assign({},st,{fill:{patternType:'solid',fgColor:{rgb:v==='接近上限'?'FFF2CC':v==='需覆核'?'FCE4D6':'F4CCCC'}},font:{bold:true,color:{rgb:v==='接近上限'?'9C6500':'A73B2E'},name:'Arial',sz:10}});
+      ws[ref].s=st;
+      if(typeof v==='number') ws[ref].z='#,##0';
     }
   }
-  ws['!freeze']={xSplit:1,ySplit:4};
+  ws['A1'].s=title;
 }
 
 function bindExport(){
