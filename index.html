@@ -503,14 +503,14 @@ let LOAD_FAILED = false; // 讀取雲端資料失敗時為 true：此時絕不�
 function todayKey(){ const d=new Date(); return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
 async function loadState(){
   LOAD_FAILED = false;
-  let loadedFromCloud = false, rawValue = null;
+  let loadedFromCloud = false, rawValue = null, rawUpdatedAt = null;
   try{
     const r = await storageGet();
     if(r && r.value){
       const parsed = JSON.parse(r.value);
       STATE = Object.assign({brands:[],months:[],weeks:[],forecasts:[],completions:[],auditLogs:[]}, parsed);
       BASE_STATE = cloneState(STATE);
-      loadedFromCloud = true; rawValue = r.value;
+      loadedFromCloud = true; rawValue = r.value; rawUpdatedAt = r.updatedAt || null;
     } else {
       seedInitialData(); // 只有在「雲端確實沒有資料文件」時才建立預設資料
     }
@@ -527,7 +527,7 @@ async function loadState(){
     const backupKey=todayKey();
     window.firebaseSaveBackupOnce(backupKey, rawValue).then(async()=>{
       if(!window.firebaseVerifyBackup) throw new Error('備份驗證介面未啟用');
-      const result=await window.firebaseVerifyBackup(backupKey, rawValue, r.updatedAt);
+      const result=await window.firebaseVerifyBackup(backupKey, rawValue, rawUpdatedAt);
       BACKUP_VERIFICATION=result;
       if(!result.exists) throw new Error('今日備份不存在');
       if(!result.readable || result.status==='corrupt' || result.status==='mismatch') throw new Error(result.status==='mismatch'?'備份內容與主資料不一致，且找不到主資料更新時間證據':'今日備份存在但內容不可讀取或已損壞');
