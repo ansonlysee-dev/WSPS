@@ -333,7 +333,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-13-backup-verification-fix';
+const APP_VERSION = '2026-11-13-home-excel-export';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -2625,6 +2625,14 @@ function renderExport(){
       <p class="footnote">匯出內容包含客戶／品牌、業務週、款數、件數、狀態、建立與修改人員及時間，與畫面篩選範圍一致。</p>
     </div>
     <div class="panel">
+      <h2>首頁格式 Excel 報表</h2>
+      <p class="footnote">一鍵匯出與首頁相同的總表格式；同一張工作表同時包括預計數、完成數、達成率、每週容量及風險狀態，毋須另外整理。</p>
+      <div class="field-row">
+        <div class="field"><label>報表月份</label><select id="homeReportMonth">${months.map(m=>`<option value="${m.id}" ${m.id===defaultMonthId(frontMonths(months))?'selected':''}>${monthLabel(m.ym)}</option>`).join('')}</select></div>
+        <button class="btn" id="exportHomeXlsxBtn">匯出首頁格式 Excel</button>
+      </div>
+    </div>
+    <div class="panel">
       <h2>完整備份（JSON）</h2>
       <p class="footnote">JSON 適合完整還原；Excel 適合閱讀、會議及離線分析。兩者都包含月份、業務週、客戶、預測數及完成數。建議定期下載備份。</p>
       <div class="field-row">
@@ -2662,6 +2670,52 @@ function cloudBackupDateOptions(){
   }
   return opts.join('');
 }
+function buildHomepageExcelReport(monthId){
+  const months=[...STATE.months].sort((a,b)=>a.ym.localeCompare(b.ym));
+  const month=STATE.months.find(m=>m.id===monthId)||months.find(m=>m.id===defaultMonthId(frontMonths(months)))||months[0];
+  if(!month) return null;
+  const weeks=STATE.weeks.filter(w=>w.monthId===month.id).sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const brands=STATE.brands.filter(b=>b.active).sort((a,b)=>a.name.localeCompare(b.name));
+  const rec=(kind,brandId,weekId)=>{const list=kind==='forecast'?STATE.forecasts:STATE.completions;return list.find(x=>x.brandId===brandId&&x.weekId===weekId&&x.status!=='cancelled'&&!x.itemRef)||{};};
+  const nums=(brandId,weekId)=>{const f=rec('forecast',brandId,weekId),c=rec('completion',brandId,weekId);return [Number(f.styles||0),Number(f.pieces||0),Number(c.styles||0),Number(c.pieces||0)];};
+  const rows=[];
+  const total=[0,0,0,0];
+  const colCount=7+weeks.length*6;
+  const title=['WSPS 首頁格式總表',...Array(Math.max(1,colCount-1)).fill('')]; rows.push(title);
+  rows.push(['月份',monthLabel(month.ym),'匯出時間',new Date().toLocaleString('zh-HK'),...Array(Math.max(1,colCount-4)).fill('')]);
+  const head=['品牌／客戶','本月預計','本月預計','本月完成','本月完成','完成率','完成率'];
+  weeks.forEach(w=>head.push(weekLabel(w),'','','','','')); rows.push(head);
+  const sub=['','款數','件數','款數','件數','款數','件數']; weeks.forEach(()=>sub.push('預計款','預計件','完成款','完成件','達成率','容量／狀態')); rows.push(sub);
+  brands.forEach(b=>{
+    const monthly=[0,0,0,0], row=[b.name];
+    weeks.forEach(w=>{const n=nums(b.id,w.id);n.forEach((v,i)=>{monthly[i]+=v;total[i]+=v});row.push(...n, n[0]?Math.round(n[2]/n[0]*100)+'%':'—', weekStatus(w).level==='normal'?'正常':weekStatus(w).level==='near'?'接近上限':weekStatus(w).level==='at'?'需覆核':'超出上限');});
+    row.splice(1,0,monthly[0],monthly[1],monthly[2],monthly[3],monthly[0]?Math.round(monthly[2]/monthly[0]*100)+'%':'—',monthly[1]?Math.round(monthly[3]/monthly[1]*100)+'%':'—');
+    rows.push(row);
+  });
+  const totalRow=['Total：',total[0],total[1],total[2],total[3],total[0]?Math.round(total[2]/total[0]*100)+'%':'—',total[1]?Math.round(total[3]/total[1]*100)+'%':'—'];
+  weeks.forEach(w=>{const t=weekTotals(w.id),c=weekCaps(w),st=weekStatus(w);totalRow.push(t.styles,t.pieces,'—','—',t.styles?Math.round(t.styles/c.styleCap*100)+'%':'—',st.level==='normal'?'正常':st.level==='near'?'接近上限':st.level==='at'?'需覆核':'超出上限');}); rows.push(totalRow);
+  const weekStart=7, merges=[{s:{r:0,c:0},e:{r:0,c:colCount-1}},{s:{r:1,c:0},e:{r:1,c:colCount-1}},{s:{r:2,c:0},e:{r:3,c:0}},{s:{r:2,c:1},e:{r:2,c:2}},{s:{r:2,c:3},e:{r:2,c:4}},{s:{r:2,c:5},e:{r:2,c:6}}]; weeks.forEach((w,i)=>merges.push({s:{r:2,c:weekStart+i*6},e:{r:2,c:weekStart+i*6+5}}));
+  return {rows,merges,month,weeks};
+}
+function styleHomepageExcelSheet(ws, report){
+  ws['!merges']=report.merges; ws['!cols']=[{wch:28},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},...report.weeks.flatMap(()=>[{wch:10},{wch:10},{wch:10},{wch:10},{wch:11},{wch:14}])];
+  const dark={fill:{fgColor:{rgb:'1E1B16'}},font:{bold:true,color:{rgb:'FFFFFF'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
+  const forecast={fill:{fgColor:{rgb:'DDE4EC'}},font:{color:{rgb:'2F4665'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
+  const complete={fill:{fgColor:{rgb:'DEEBE2'}},font:{color:{rgb:'3F6B4B'}},alignment:{horizontal:'center',vertical:'center',wrapText:true}};
+  const total={fill:{fgColor:{rgb:'F6E9D3'}},font:{bold:true},alignment:{horizontal:'center',vertical:'center'}};
+  const cell=(r,c)=>XLSX.utils.encode_cell({r,c});
+  for(let c=0;c<report.rows[0].length;c++) if(ws[cell(0,c)]) ws[cell(0,c)].s={font:{bold:true,sz:16},alignment:{horizontal:'left'}};
+  for(let c=0;c<report.rows[2].length;c++){if(ws[cell(2,c)])ws[cell(2,c)].s=dark;if(ws[cell(3,c)])ws[cell(3,c)].s=dark;}
+  for(let r=4;r<report.rows.length;r++){
+    if(ws[cell(r,0)]) ws[cell(r,0)].s={font:{bold:r===report.rows.length-1}};
+    for(let c=1;c<report.rows[r].length;c++) if(ws[cell(r,c)]){
+      const isTotal=r===report.rows.length-1; const weekOffset=c>=7?(c-7)%6:-1;
+      ws[cell(r,c)].s=isTotal?total:(weekOffset===0||weekOffset===1||c===1||c===2?forecast:(weekOffset===2||weekOffset===3||c===3||c===4?complete:{alignment:{horizontal:'center',vertical:'center'}}));
+    }
+  }
+  ws['!freeze']={xSplit:1,ySplit:4};
+}
+
 function bindExport(){
   const monthIdFor = ()=> document.getElementById('exportMonth').value;
   const typeFor = ()=> document.getElementById('exportType').value;
@@ -2690,6 +2744,17 @@ function bindExport(){
 
   const refreshAnalysisBtn=document.getElementById('refreshAnalysisBtn');
   if(refreshAnalysisBtn) refreshAnalysisBtn.onclick=()=>{VIEW.analysisMonthId=document.getElementById('analysisMonth').value;VIEW.analysisQuery=document.getElementById('analysisBrand').value.trim();const body=document.getElementById('historicalAnalysisBody');if(body)body.innerHTML=historicalAnalysisHtml();};
+
+  const homeXlsxBtn=document.getElementById('exportHomeXlsxBtn');
+  if(homeXlsxBtn) homeXlsxBtn.onclick=()=>{
+    if(typeof XLSX==='undefined'){alert('Excel 匯出元件載入失敗，請檢查網路連線後重試。');return;}
+    const report=buildHomepageExcelReport(document.getElementById('homeReportMonth').value);
+    if(!report){alert('沒有可匯出的月份資料。');return;}
+    const ws=XLSX.utils.aoa_to_sheet(report.rows); styleHomepageExcelSheet(ws,report);
+    const wb=XLSX.utils.book_new(); wb.Props={Title:'WSPS 首頁格式總表',Subject:'預計數及完成數整合報表',Author:'WSPS'};
+    XLSX.utils.book_append_sheet(wb,ws,'首頁總表');
+    XLSX.writeFile(wb,'WSPS_首頁總表_'+report.month.ym+'.xlsx',{cellStyles:true});
+  };
 
   const btn = document.getElementById('exportBtn');
   if(btn) btn.onclick = ()=>{
