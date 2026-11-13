@@ -284,7 +284,7 @@
     window.firebaseSaveBackupOnce = async (key, value) => {
       const bref = doc(db, "wsps", "backup-" + key);
       const snap = await getDoc(bref);
-      if (!snap.exists()) { await setDoc(bref, { value, savedAt: Date.now(), bytes: String(value||'').length }); return true; }
+      if (!snap.exists()) { const savedAt=Date.now(); await setDoc(bref, { value, savedAt, bytes: String(value||'').length, sha256: await sha256Text(value) }); return true; }
       return false;
     };
     async function sha256Text(value){
@@ -292,12 +292,19 @@
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       return [...new Uint8Array(digest)].map(x=>x.toString(16).padStart(2,'0')).join('');
     }
-    window.firebaseVerifyBackup = async (key, expectedValue) => {
+    window.firebaseVerifyBackup = async (key, expectedValue, mainUpdatedAt) => {
       const snap = await getDoc(doc(db, "wsps", "backup-" + key));
-      if (!snap.exists()) return {exists:false, readable:false, key};
+      if (!snap.exists()) return {exists:false, readable:false, status:'missing', key};
       const d=snap.data(), value=typeof d.value==='string'?d.value:null;
-      if(value==null) return {exists:true, readable:false, key, bytes:0, savedAt:d.savedAt||null};
-      return {exists:true, readable:true, key, bytes:value.length, savedAt:d.savedAt||null, hash:await sha256Text(value), expectedHash:await sha256Text(expectedValue), hashMatches:await sha256Text(value)===await sha256Text(expectedValue)};
+      if(value==null) return {exists:true, readable:false, status:'unreadable', key, bytes:0, savedAt:d.savedAt||null};
+      let parseable=true; try{ const parsed=JSON.parse(value); parseable=!!parsed && typeof parsed==='object'; }catch(e){ parseable=false; }
+      if(!parseable) return {exists:true, readable:false, status:'corrupt', key, bytes:value.length, savedAt:d.savedAt||null};
+      const actualHash=await sha256Text(value), expectedHash=await sha256Text(expectedValue);
+      const hashMatches=actualHash===expectedHash;
+      const savedAt=Number(d.savedAt||0), currentAt=Number(mainUpdatedAt||0);
+      const isOlderSnapshot=!hashMatches && savedAt>0 && currentAt>savedAt;
+      const storedHashOk=!d.sha256 || d.sha256===actualHash;
+      return {exists:true, readable:true, status:!storedHashOk?'corrupt':hashMatches?'match':isOlderSnapshot?'stale':'mismatch', key, bytes:value.length, savedAt:d.savedAt||null, mainUpdatedAt:mainUpdatedAt||null, hash:actualHash, expectedHash, hashMatches, storedHash: d.sha256||null, storedHashOk};
     };
     window.firebaseWriteAuditLog = async (log) => {
       await setDoc(doc(db, "wsps_audit_logs", log.id), Object.assign({}, log, {savedAt:Date.now()}));
@@ -326,7 +333,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-13-timeout-safe-start';
+const APP_VERSION = '2026-11-13-backup-verification-fix';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -461,7 +468,7 @@ async function storageGet(){
   if(HAS_CLOUD_STORAGE) return await window.storage.get(STORAGE_KEY, true);
   requireSharedStorage(); setSyncStatus('saving','正在讀取雲端資料…');
   const r=await withTimeout(window.firebaseGetData(),15000,'讀取雲端資料');
-  if(r) REMOTE_VERSION=r.updatedAt; setSyncStatus('ok','已同步雲端資料'); return r?{value:r.value}:null;
+  if(r) REMOTE_VERSION=r.updatedAt; setSyncStatus('ok','已同步雲端資料'); return r?{value:r.value,updatedAt:r.updatedAt}:null;
 }
 async function storageSet(valueStr){
   if(!ONLINE) throw new Error('目前未連線，修改尚未寫入雲端');
@@ -520,12 +527,12 @@ async function loadState(){
     const backupKey=todayKey();
     window.firebaseSaveBackupOnce(backupKey, rawValue).then(async()=>{
       if(!window.firebaseVerifyBackup) throw new Error('備份驗證介面未啟用');
-      const result=await window.firebaseVerifyBackup(backupKey, rawValue);
+      const result=await window.firebaseVerifyBackup(backupKey, rawValue, r.updatedAt);
       BACKUP_VERIFICATION=result;
       if(!result.exists) throw new Error('今日備份不存在');
-      if(!result.readable) throw new Error('今日備份存在但內容不可讀取');
-      if(!result.hashMatches) throw new Error('今日備份內容 Hash 與主資料不一致');
-      BACKUP_MESSAGE='今日備份已驗證：存在、可讀取、Hash 一致（'+result.bytes.toLocaleString()+' bytes）';
+      if(!result.readable || result.status==='corrupt' || result.status==='mismatch') throw new Error(result.status==='mismatch'?'備份內容與主資料不一致，且找不到主資料更新時間證據':'今日備份存在但內容不可讀取或已損壞');
+      if(result.status==='stale') BACKUP_MESSAGE='今日備份正常：可讀取；主資料在備份後已有更新（'+result.bytes.toLocaleString()+' bytes）';
+      else BACKUP_MESSAGE='今日備份已驗證：存在、可讀取、內容完整（'+result.bytes.toLocaleString()+' bytes）';
       softRender();
     }).catch(e=>{BACKUP_MESSAGE='每日備份驗證失敗：'+e.message; BACKUP_VERIFICATION={exists:false,readable:false,error:e.message}; setSyncStatus('error',BACKUP_MESSAGE); softRender(); console.warn('備份驗證失敗', e);});
   }
