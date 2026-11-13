@@ -326,7 +326,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-12-audit-backup-safety';
+const APP_VERSION = '2026-11-13-timeout-safe-start';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -452,7 +452,7 @@ function requireSharedStorage(){ if(!HAS_CLOUD_STORAGE && !USING_FIREBASE) throw
 function withTimeout(promise, ms, label){
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(()=>reject(new Error((label||'操作')+'逾時（超過 '+(ms/1000)+' 秒無回應），請檢查 Firestore 是否為 Native mode、網路是否被封鎖。')), ms))
+    new Promise((_, reject) => setTimeout(()=>{const e=new Error((label||'操作')+'逾時（超過 '+(ms/1000)+' 秒無回應），請檢查 Firestore 是否為 Native mode、網路是否被封鎖。'); e.isTimeout=true; reject(e);}, ms))
   ]);
 }
 let REMOTE_VERSION = null; // 最後一次已知的雲端版本戳記，用於偵測「舊分頁／其他人已搶先儲存」的衝突
@@ -538,7 +538,12 @@ async function loadState(){
   runBrandRepairMigration();
   runSepWeeklyImportMigration();
   runWorkdaysCapMigration();
-  await persist();
+  // 只讀取資料時不要寫回整份 Firestore；只有 migration 真正改變資料才保存。
+  const migratedValue = JSON.stringify(STATE);
+  if(migratedValue !== rawValue){
+    DIRTY = true; DIRTY_SEQ++;
+    await persist();
+  }
   LOADED = true;
   if(USING_FIREBASE && window.firebaseListen){
     window.firebaseListen((valueStr, updatedAt)=>{
@@ -655,15 +660,40 @@ async function persistNow(opts){
   BLOCK_RETRY = false;
   try{ validateStateForWrite(STATE); }catch(validationError){ CLOUD_ERROR=validationError; setSyncStatus('error',validationError.message); return; }
   const seq = DIRTY_SEQ;
+  const payload = JSON.stringify(STATE);
   let succeeded = false;
   try{
     SAVING = true;
     CLOUD_ERROR = null;
     for(let attempt=0; attempt<4 && !succeeded; attempt++){
       try{
-        await storageSet(JSON.stringify(STATE));
+        await storageSet(payload);
         succeeded = true;
       }catch(e){
+        // Firestore 可能已完成寫入但回覆延遲；先讀回確認，避免同事重複輸入或覆蓋。
+        if(e && e.isTimeout && USING_FIREBASE && window.firebaseGetData){
+          setSyncStatus('saving','寫入回覆逾時，正在確認雲端資料…');
+          try{
+            const latest = await withTimeout(window.firebaseGetData(),10000,'確認雲端資料');
+            if(latest && latest.value === payload){
+              REMOTE_VERSION = latest.updatedAt || REMOTE_VERSION;
+              succeeded = true;
+              setSyncStatus('ok','已確認雲端已保存（回覆較慢）');
+            }else if(latest && latest.updatedAt != null && latest.updatedAt !== REMOTE_VERSION){
+              CONFLICT_NOTICE='其他同事已先更新雲端資料，請先重新整理確認。';
+              BLOCK_RETRY=true;
+              setSyncStatus('error','同步衝突：逾時後確認到其他版本，未覆蓋雲端資料');
+              return;
+            }else{
+              e.message='寫入回覆逾時，尚未能確認是否保存；請先重新整理確認，勿重複輸入。';
+              throw e;
+            }
+          }catch(confirmError){
+            if(confirmError===e) throw e;
+            e.message='寫入回覆逾時，確認雲端資料也逾時；請先重新整理確認，勿重複輸入。';
+            throw e;
+          }
+        }
         if(e && e.isVersionConflict && USING_FIREBASE){
           CONFLICT_NOTICE='其他同事已先更新雲端資料。';
           BLOCK_RETRY=true;
@@ -689,7 +719,7 @@ async function persistNow(opts){
     SAVING = false;
     const hint = document.getElementById('saveHint');
     if(hint){
-      hint.textContent = succeeded ? '已同步' : '未同步：請檢查網絡或稍後再試';
+      hint.textContent = succeeded ? '已同步' : '未同步：請先重新整理確認，勿重複輸入';
       hint.classList.add('show');
       clearTimeout(saveTimer);
       saveTimer = setTimeout(()=>hint.classList.remove('show'), 2200);
