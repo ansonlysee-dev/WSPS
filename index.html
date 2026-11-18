@@ -284,8 +284,11 @@
     window.firebaseSaveBackupOnce = async (key, value) => {
       const bref = doc(db, "wsps", "backup-" + key);
       const snap = await getDoc(bref);
-      if (!snap.exists()) { const savedAt=Date.now(); await setDoc(bref, { value, savedAt, bytes: String(value||'').length, sha256: await sha256Text(value) }); return true; }
-      return false;
+      if (snap.exists()) return {created:false, key, savedAt:snap.data().savedAt||null};
+      const savedAt=Date.now();
+      const text=String(value||'');
+      await setDoc(bref, { value:text, savedAt, bytes:text.length, sha256: await sha256Text(text), schemaVersion:2 });
+      return {created:true, key, savedAt};
     };
     async function sha256Text(value){
       const bytes = new TextEncoder().encode(String(value||''));
@@ -333,7 +336,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-13-home-excel-design';
+const APP_VERSION = '2026-11-18-backup-reliability-fix';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -500,7 +503,28 @@ function validateStateForWrite(state){
 }
 
 let LOAD_FAILED = false; // 讀取雲端資料失敗時為 true：此時絕不可用預設資料覆蓋雲端
-function todayKey(){ const d=new Date(); return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
+function todayKey(){
+  const parts = new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Hong_Kong',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const get = t => parts.find(x=>x.type===t)?.value || '';
+  return get('year')+'-'+get('month')+'-'+get('day');
+}
+function waitMs(ms){ return new Promise(resolve=>setTimeout(resolve,ms)); }
+async function createAndVerifyDailyBackup(key, rawValue, mainUpdatedAt){
+  let lastError=null;
+  for(let attempt=1; attempt<=3; attempt++){
+    try{
+      await withTimeout(window.firebaseSaveBackupOnce(key, rawValue),12000,'建立每日備份');
+      const result=await withTimeout(window.firebaseVerifyBackup(key, rawValue, mainUpdatedAt),12000,'驗證每日備份');
+      if(result && result.exists && result.readable && ['match','stale'].includes(result.status)) return result;
+      const detail=result?.status || 'unknown';
+      throw new Error('備份驗證狀態：'+detail);
+    }catch(e){
+      lastError=e;
+      if(attempt<3) await waitMs(attempt*2000);
+    }
+  }
+  throw lastError || new Error('每日備份建立失敗');
+}
 async function loadState(){
   LOAD_FAILED = false;
   let loadedFromCloud = false, rawValue = null, rawUpdatedAt = null;
@@ -523,18 +547,18 @@ async function loadState(){
     return;
   }
   // 每日一次自動備份（取當日第一次載入時的雲端資料，之後當日的修改不會覆蓋此備份）
-  if(loadedFromCloud && USING_FIREBASE && window.firebaseSaveBackupOnce){
+  if(loadedFromCloud && USING_FIREBASE && window.firebaseSaveBackupOnce && window.firebaseVerifyBackup){
     const backupKey=todayKey();
-    window.firebaseSaveBackupOnce(backupKey, rawValue).then(async()=>{
-      if(!window.firebaseVerifyBackup) throw new Error('備份驗證介面未啟用');
-      const result=await window.firebaseVerifyBackup(backupKey, rawValue, rawUpdatedAt);
+    createAndVerifyDailyBackup(backupKey, rawValue, rawUpdatedAt).then(result=>{
       BACKUP_VERIFICATION=result;
-      if(!result.exists) throw new Error('今日備份不存在');
-      if(!result.readable || result.status==='corrupt' || result.status==='mismatch') throw new Error(result.status==='mismatch'?'備份內容與主資料不一致，且找不到主資料更新時間證據':'今日備份存在但內容不可讀取或已損壞');
       if(result.status==='stale') BACKUP_MESSAGE='今日備份正常：可讀取；主資料在備份後已有更新（'+result.bytes.toLocaleString()+' bytes）';
       else BACKUP_MESSAGE='今日備份已驗證：存在、可讀取、內容完整（'+result.bytes.toLocaleString()+' bytes）';
       softRender();
-    }).catch(e=>{BACKUP_MESSAGE='每日備份驗證失敗：'+e.message; BACKUP_VERIFICATION={exists:false,readable:false,error:e.message}; setSyncStatus('error',BACKUP_MESSAGE); softRender(); console.warn('備份驗證失敗', e);});
+    }).catch(e=>{
+      BACKUP_MESSAGE='每日備份建立／驗證失敗（已重試 3 次）：'+e.message;
+      BACKUP_VERIFICATION={exists:false,readable:false,status:'error',error:e.message,attempts:3};
+      setSyncStatus('error',BACKUP_MESSAGE); softRender(); console.warn('備份驗證失敗', e);
+    });
   }
   if(loadedFromCloud && USING_FIREBASE && window.firebaseGetAuditLogs){
     window.firebaseGetAuditLogs().then(logs=>{ AUDIT_REMOTE=Array.isArray(logs)?logs:[]; softRender(); }).catch(e=>{ console.warn('讀取獨立 Audit Log 失敗',e); });
