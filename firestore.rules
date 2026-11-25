@@ -1,0 +1,130 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userRecord() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return signedIn() && userRecord().role == 'admin';
+    }
+
+    function isWrd() {
+      return signedIn() && userRecord().role == 'wrd';
+    }
+
+    function isPrivileged() {
+      return isAdmin() || isWrd();
+    }
+
+    function ownsBrand(brand) {
+      return signedIn() && userRecord().brand == brand;
+    }
+
+    function validNonNegativeInteger(value) {
+      return value is int && value >= 0;
+    }
+
+    function validProjectionEntry() {
+      return request.resource.data.keys().hasOnly([
+        'brand', 'weekId', 'styles', 'pieces', 'updatedBy', 'updatedAt'
+      ])
+      && request.resource.data.keys().hasAll([
+        'brand', 'weekId', 'styles', 'pieces', 'updatedBy', 'updatedAt'
+      ])
+      && request.resource.data.brand is string
+      && request.resource.data.weekId is string
+      && validNonNegativeInteger(request.resource.data.styles)
+      && validNonNegativeInteger(request.resource.data.pieces)
+      && request.resource.data.styles <= request.resource.data.pieces
+      && request.resource.data.updatedBy == request.auth.uid
+      && request.resource.data.updatedAt is timestamp;
+    }
+
+    // Current WSPS storage: one protected aggregate document.
+    // Authentication is required for reads; only WRD/admin may write until
+    // the data-splitting migration is completed and tested.
+    match /wsps/data {
+      allow read: if signedIn();
+      allow write: if isPrivileged();
+      allow delete: if false;
+    }
+
+    // Backups are append-only. The backup worker must use an authenticated
+    // privileged identity and a new document ID for each date.
+    match /wsps/{backupId} {
+      allow read: if signedIn();
+      allow create: if isPrivileged()
+        && backupId.matches('backup-[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && request.resource.data.keys().hasOnly([
+          'value', 'savedAt', 'bytes', 'sha256', 'schemaVersion'
+        ])
+        && request.resource.data.keys().hasAll([
+          'value', 'savedAt', 'bytes', 'sha256', 'schemaVersion'
+        ])
+        && request.resource.data.value is string
+        && request.resource.data.savedAt is timestamp
+        && request.resource.data.bytes is int
+        && request.resource.data.bytes >= 0
+        && request.resource.data.sha256 is string
+        && request.resource.data.schemaVersion == 2;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Immutable audit records: authenticated clients may append only.
+    match /wsps_audit_logs/{logId} {
+      allow read: if isPrivileged();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly([
+          'id', 'actorUid', 'at', 'brand', 'weekId', 'field',
+          'before', 'after', 'source'
+        ])
+        && request.resource.data.keys().hasAll([
+          'id', 'actorUid', 'at', 'brand', 'weekId', 'field',
+          'before', 'after', 'source'
+        ])
+        && request.resource.data.id == logId
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.at is timestamp
+        && request.resource.data.brand is string
+        && request.resource.data.weekId is string
+        && request.resource.data.field is string
+        && request.resource.data.source is string;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Future split-record model. This is intentionally not used by the
+    // current website; it documents and tests the intended brand-level ACL.
+    match /wsps_entries/{entryId} {
+      allow read: if signedIn();
+      allow create: if validProjectionEntry() && (isPrivileged() || (
+        signedIn()
+        && ownsBrand(request.resource.data.brand)
+      ));
+      allow update: if validProjectionEntry() && (isPrivileged() || (
+        signedIn()
+        && ownsBrand(resource.data.brand)
+        && resource.data.brand == request.resource.data.brand
+      ));
+      allow delete: if false;
+    }
+
+    // User role/brand records are managed by administrators only.
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
