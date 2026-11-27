@@ -336,7 +336,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-23-input-ux-fix';
+const APP_VERSION = '2026-11-27-scroll-preserve-fix';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -771,6 +771,10 @@ function commitEdit(){
 function renderKeepFocus(){
   const ae = document.activeElement;
   let info = null;
+  const pageScroll = {x:window.scrollX, y:window.scrollY};
+  const panelScroll = [...document.querySelectorAll('#app .excel-home-wrap, #app .matrix-wrap')].map((el,index)=>({
+    index, className:el.className, top:el.scrollTop, left:el.scrollLeft
+  }));
   if(ae && ae.tagName==='INPUT' && ae.closest && ae.closest('#app')){
     info = {ds:Object.assign({}, ae.dataset), value:ae.value};
   }
@@ -784,6 +788,13 @@ function renderKeepFocus(){
       try{ el.select(); }catch(e){}
     }
   }
+  window.scrollTo(pageScroll.x,pageScroll.y);
+  panelScroll.forEach(s=>{
+    const panels=[...document.querySelectorAll('#app .excel-home-wrap, #app .matrix-wrap')]
+      .filter(el=>el.className===s.className);
+    const panel=panels[s.index];
+    if(panel){ panel.scrollTop=s.top; panel.scrollLeft=s.left; }
+  });
 }
 // 遠端更新／合併後使用：若使用者正在輸入框內打字，先不重畫，等離開輸入框後才刷新
 function softRender(){
@@ -1728,13 +1739,13 @@ function handleHomeInputChange(inp){
   EDIT_SOURCE='excel-home';
   const kind=inp.dataset.homeKind, brandId=inp.dataset.brand, weekId=inp.dataset.week, field=inp.dataset.field;
   const raw=inp.value.trim(), val=raw===''?null:Math.max(0,Math.floor(Number(raw)));
-  if(raw!==''&&!Number.isFinite(val)){alert('請輸入非負整數');render();return;}
+  if(raw!==''&&!Number.isFinite(val)){alert('請輸入非負整數');renderKeepFocus();return;}
   if(kind==='forecast'){
     const proxy={dataset:{brand:brandId,week:weekId,field},value:raw}; handleMatrixInputChange(proxy); return;
   }
-  if(!canEditBrand(brandId)){alert('此品牌資料目前不可修改。');render();return;}
+  if(!canEditBrand(brandId)){alert('此品牌資料目前不可修改。');renderKeepFocus();return;}
   const existing=STATE.completions.find(c=>c.brandId===brandId&&c.weekId===weekId&&c.status!=='cancelled'&&!c.itemRef);let styles=existing?existing.styles:null,pieces=existing?existing.pieces:null;if(field==='styles')styles=val;if(field==='pieces')pieces=val;
-  if((styles!=null&&pieces!=null&&Number(styles)>Number(pieces))){alert('資料不合理：款數不能多於件數。');render();return;}
+  if((styles!=null&&pieces!=null&&Number(styles)>Number(pieces))){alert('資料不合理：款數不能多於件數。');renderKeepFocus();return;}
   upsertCompletion({brandId,weekId,itemRef:'',styles,pieces,note:''});commitEdit();
 }
 
@@ -1838,18 +1849,18 @@ function handleMatrixInputChange(inp){
   const brandId = inp.dataset.brand, weekId = inp.dataset.week, field = inp.dataset.field;
   let raw = inp.value.trim();
   let val = raw==='' ? null : Math.max(0, Math.floor(Number(raw)));
-  if(raw!=='' && (isNaN(val))) { alert('請輸入非負整數'); render(); return; }
+  if(raw!=='' && (isNaN(val))) { alert('請輸入非負整數'); renderKeepFocus(); return; }
 
   const existing = STATE.forecasts.find(f=>f.brandId===brandId && f.weekId===weekId && f.status!=='cancelled' && !f.itemRef);
 
   if(!canEditBrand(brandId)){
     alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。');
-    render();
+    renderKeepFocus();
     return;
   }
   if(!canEditForecastCell(brandId, STATE.weeks.find(w=>w.id===weekId))){
     alert('此業務週已過，數據已鎖定，只有 WRD 或系統管理員可以修改。');
-    render();
+    renderKeepFocus();
     return;
   }
 
@@ -1861,7 +1872,7 @@ function handleMatrixInputChange(inp){
   if(!existing && val==null){ return; } // 沒有紀錄又沒輸入內容：不需處理
   if(invalidForecastPair(styles, pieces)){
     alert('資料不合理：款數不能多於件數。請先調整數值後再儲存。');
-    render();
+    renderKeepFocus();
     return;
   }
 
