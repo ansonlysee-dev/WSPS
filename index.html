@@ -336,7 +336,7 @@ const PIECES_PLAN_PER_DAY = 400;
 const PIECES_OPS_PER_DAY = 425;
 const MONTH_PIECE_CAP_DEFAULT = 10000;
 const AVG_PIECES_PER_STYLE = 5;
-const APP_VERSION = '2026-11-27-scroll-preserve-fix';
+const APP_VERSION = '2026-11-27-scroll-preserve-all-fix';
 const VERSION_SEEN_KEY = 'wsps:last-seen-version';
 
 const SYSTEM_ADMIN_NAME = 'ansonly'; // 「系統管理員」身份只有此姓名可選用（比對時忽略大小寫與空格）
@@ -1902,9 +1902,9 @@ function handleMatrixInputChange(inp){
         ? `本週預計件數將達 ${newPieceTotal} 件，超出操作參考上限 ${caps.pieceCapOps} 件。儲存後將自動標記「待 WRD 覆核」。是否確認儲存？`
         : `本週預計款數將達 ${newStyleTotal} 款，較上限 ${caps.styleCap} 款超出 ${Math.max(0,newStyleTotal-caps.styleCap)} 款。是否確認儲存？`,
       onConfirm: ()=>{ doSave(overOpsCap ? 'pending_review' : undefined); PENDING_CONFIRM=null; },
-      onCancel: ()=>{ PENDING_CONFIRM=null; render(); }
+      onCancel: ()=>{ PENDING_CONFIRM=null; renderKeepFocus(); }
     };
-    render();
+    renderKeepFocus();
     return;
   }
   doSave(overPlanCap ? undefined : undefined);
@@ -2117,8 +2117,8 @@ function bindCompletion(){
       const brandId = inp.dataset.cbrand, weekId = inp.dataset.cweek, field = inp.dataset.cfield;
       const raw = inp.value.trim();
       const val = raw==='' ? null : Math.max(0, Math.floor(Number(raw)));
-      if(raw!=='' && isNaN(val)){ alert('請輸入非負整數'); render(); return; }
-      if(!canEditBrand(brandId)){ alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。'); render(); return; }
+      if(raw!=='' && isNaN(val)){ alert('請輸入非負整數'); renderKeepFocus(); return; }
+      if(!canEditBrand(brandId)){ alert('此品牌資料只有該品牌登入身份、WRD 或系統管理員可以修改。'); renderKeepFocus(); return; }
       const existing = STATE.completions.find(c=>c.brandId===brandId && c.weekId===weekId && c.status!=='cancelled' && !c.itemRef);
       if(!existing && val==null) return;
       let styles = existing ? existing.styles : null;
@@ -2555,14 +2555,14 @@ function bindCalendar(){
     inp.onchange = ()=>{
       const w = STATE.weeks.find(x=>x.id===inp.dataset.workdays);
       w.workdays = Math.max(0, parseInt(inp.value,10)||0);
-      persist().then(render);
+      persist().then(renderKeepFocus);
     };
   });
   document.querySelectorAll('[data-weekmonth]').forEach(sel=>{
     sel.onchange = ()=>{
       const w = STATE.weeks.find(x=>x.id===sel.dataset.weekmonth);
       w.monthId = sel.value;
-      persist().then(render);
+      persist().then(renderKeepFocus);
     };
   });
   bindOverrideInput('stylecapoverride', 'styleCapOverride');
@@ -2572,12 +2572,12 @@ function bindCalendar(){
     inp.onchange = ()=>{
       const m = STATE.months.find(x=>x.id===inp.dataset.monthcapoverride);
       const raw = inp.value.trim();
-      if(raw===''){ m.pieceCapOverride=null; m.overrideReason=''; m.overrideBy=''; m.overrideAt=''; persist().then(render); return; }
+      if(raw===''){ m.pieceCapOverride=null; m.overrideReason=''; m.overrideBy=''; m.overrideAt=''; persist().then(renderKeepFocus); return; }
       const reason = prompt('請輸入覆寫原因：');
-      if(reason===null){ render(); return; }
+      if(reason===null){ renderKeepFocus(); return; }
       m.pieceCapOverride = Math.max(0, parseInt(raw,10)||0);
       m.overrideReason = reason; m.overrideBy = currentUser(); m.overrideAt = nowStr();
-      persist().then(render);
+      persist().then(renderKeepFocus);
     };
   });
 }
@@ -2586,12 +2586,12 @@ function bindOverrideInput(dataAttr, field){
     inp.onchange = ()=>{
       const w = STATE.weeks.find(x=>x.id===inp.dataset[toCamel(dataAttr)]);
       const raw = inp.value.trim();
-      if(raw===''){ w[field]=null; persist().then(render); return; }
+      if(raw===''){ w[field]=null; persist().then(renderKeepFocus); return; }
       const reason = prompt('請輸入覆寫原因：');
-      if(reason===null){ render(); return; }
+      if(reason===null){ renderKeepFocus(); return; }
       w[field] = Math.max(0, parseInt(raw,10)||0);
       w.overrideReason = reason; w.overrideBy = currentUser(); w.overrideAt = nowStr();
-      persist().then(render);
+      persist().then(renderKeepFocus);
     };
   });
 }
@@ -2645,7 +2645,7 @@ function bindBrands(){
       const brand = STATE.brands.find(x=>x.id===inp.dataset.brandname);
       const v = inp.value.trim();
       if(v) brand.name = v;
-      persist().then(render);
+      persist().then(renderKeepFocus);
     };
   });
 }
